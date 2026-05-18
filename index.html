@@ -1729,7 +1729,7 @@
             header: false, footer: false,
             // Scaling — Excel "Page Setup → Page" tab equivalent:
             //   'full'    = print at 100% (default; wide tables get chunked
-            //               horizontally by _splitColumnsForPages)
+            //               horizontally by SeShared.print.pdfGenerator.splitColumnsForPages)
             //   'fit'     = auto-scale so the table fits in fitWide pages
             //               wide × fitTall pages tall (0 = unlimited)
             //   'percent' = manual scale at scalePercent %
@@ -2431,29 +2431,10 @@
         // cuts a new chunk every time the next column would overflow.
         // Single overflow-wider-than-page columns get their own chunk
         // (autoTable will then size them down to fit the page).
-        function _splitColumnsForPages(widthsMm, printableWidthMm) {
-            // 0.5mm slack absorbs the floating-point spillover that
-            // creeps in when callers compute scale = printableW / totalW
-            // and the multiplication round-trip lands a hair > printable
-            // (e.g. 14 cols × 12.428mm = 174.009 vs 174mm printable).
-            // Without it, fit-to-N-wide silently produces N+1 chunks.
-            const limit = printableWidthMm + 0.5;
-            const chunks = [];
-            let current = [];
-            let currentW = 0;
-            for (let c = 0; c < widthsMm.length; c++) {
-                const w = widthsMm[c];
-                if (current.length > 0 && currentW + w > limit) {
-                    chunks.push(current);
-                    current = [];
-                    currentW = 0;
-                }
-                current.push(c);
-                currentW += w;
-            }
-            if (current.length > 0) chunks.push(current);
-            return chunks;
-        }
+        // Column-pagination math lives in SeShared.print.pdfGenerator. The
+        // single caller (bodyChunks in printSheetToPdf) already awaits
+        // loadJsPdfAssets which loads the shared module, so the global
+        // is guaranteed by then — no extra await needed here.
 
         // Render the current Univer snapshot as a PDF via jsPDF +
         // autoTable and open it in a new tab so the user can review +
@@ -2706,7 +2687,7 @@
                     c => scaledColWidths[c - minC]);
                 const splitterPrintableW = Math.max(
                     10, printableW - repeatColsWidthMm);
-                const bodyChunks = _splitColumnsForPages(
+                const bodyChunks = SeShared.print.pdfGenerator.splitColumnsForPages(
                     bodyColWidthsMm, splitterPrintableW);
                 const colChunks = bodyChunks.map(chunk => [
                     ...repeatCols,
@@ -3012,30 +2993,17 @@
 
         // ===== jsPDF + autoTable + Sarabun Thai font lazy-loader =====
         // Only loaded when the user clicks Print in Sheet view (Univer's
-        // canvas-based render doesn't survive @media print). jsPDF + the
-        // autoTable plugin handle layout; the Sarabun TTFs are needed
-        // because jsPDF's built-in fonts (Helvetica/Times) can't render
-        // Thai glyphs — without them, Thai text comes out as tofu (▢▢▢).
+        // canvas-based render doesn't survive @media print). Delegates to
+        // the shared print/pdf-generator module — jsPDF + autoTable + the
+        // Sarabun TTFs + the addFonts event hook all live there now.
         // Total cold-start cost ~370 KB, all from jsdelivr.
-        const JSPDF_URL = 'https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js';
-        const JSPDF_AUTOTABLE_URL = 'https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js';
-        const SARABUN_REG_URL = 'https://cdn.jsdelivr.net/npm/font-th-sarabun-new@1.0.0/fonts/THSarabunNew-webfont.ttf';
-        const SARABUN_BOLD_URL = 'https://cdn.jsdelivr.net/npm/font-th-sarabun-new@1.0.0/fonts/THSarabunNew_bold-webfont.ttf';
-        const jsPdfState = { loaded: false, loadingPromise: null };
-
-        // ArrayBuffer → base64 in chunks so we don't blow the call stack
-        // on 96 KB TTFs (String.fromCharCode.apply collapses past ~125k
-        // args in Chrome).
-        function _arrayBufferToBase64(buffer) {
-            let binary = '';
-            const bytes = new Uint8Array(buffer);
-            const chunkSize = 0x8000;
-            for (let i = 0; i < bytes.length; i += chunkSize) {
-                binary += String.fromCharCode.apply(
-                    null, bytes.subarray(i, i + chunkSize)
-                );
-            }
-            return btoa(binary);
+        //
+        // The wrapper name is kept (callers like printSheetToPdf and the
+        // mount-time preloader call loadJsPdfAssets / preloadPrintAssets)
+        // so this stays a 1-line drop-in.
+        function loadJsPdfAssets() {
+            return loadPrintPdfGeneratorAssets()
+                .then(() => SeShared.print.pdfGenerator.loadAssets());
         }
 
         // Fire-and-forget preload, called when the user enters Sheet
@@ -3044,42 +3012,8 @@
         // handler — by the time it resolves, Chrome has revoked the
         // user-activation gesture and window.open() gets popup-blocked.
         function preloadPrintAssets() {
-            if (jsPdfState.loaded || jsPdfState.loadingPromise) return;
             loadJsPdfAssets().catch(e =>
                 console.warn('print assets preload failed (will retry on click):', e));
-        }
-
-        function loadJsPdfAssets() {
-            if (jsPdfState.loaded) return Promise.resolve();
-            if (jsPdfState.loadingPromise) return jsPdfState.loadingPromise;
-            jsPdfState.loadingPromise = (async () => {
-                await _loadUniverScript(JSPDF_URL);
-                await _loadUniverScript(JSPDF_AUTOTABLE_URL);
-                if (!window.jspdf || !window.jspdf.jsPDF) {
-                    throw new Error('jsPDF global missing after script load');
-                }
-                const [regBuf, boldBuf] = await Promise.all([
-                    fetch(SARABUN_REG_URL).then(r => r.arrayBuffer()),
-                    fetch(SARABUN_BOLD_URL).then(r => r.arrayBuffer()),
-                ]);
-                const regB64 = _arrayBufferToBase64(regBuf);
-                const boldB64 = _arrayBufferToBase64(boldBuf);
-                // jsPDF.API.events lets us run a callback on every new
-                // jsPDF instance — install the fonts into each doc's
-                // VFS so we don't pay the addFileToVFS cost twice.
-                const { jsPDF } = window.jspdf;
-                jsPDF.API.events.push(['addFonts', function () {
-                    this.addFileToVFS('THSarabun.ttf', regB64);
-                    this.addFileToVFS('THSarabun-Bold.ttf', boldB64);
-                    this.addFont('THSarabun.ttf', 'THSarabun', 'normal');
-                    this.addFont('THSarabun-Bold.ttf', 'THSarabun', 'bold');
-                }]);
-                jsPdfState.loaded = true;
-            })();
-            return jsPdfState.loadingPromise.catch(err => {
-                jsPdfState.loadingPromise = null;
-                throw err;
-            });
         }
 
         // ===== PDF.js lazy-loader =====
@@ -3177,6 +3111,30 @@
             });
             return printPreviewState.loadingPromise.catch(err => {
                 printPreviewState.loadingPromise = null;
+                throw err;
+            });
+        }
+
+        // print/pdf-generator — owns the jsPDF + autoTable + Sarabun font
+        // load (~370 KB total), the column-pagination math, and the
+        // paper/margin layout math. The local loadJsPdfAssets /
+        // preloadPrintAssets wrappers (defined further up next to the
+        // other lazy-loaders) delegate to this so existing callers
+        // (printSheetToPdf, the preload-on-mount entry point) keep their
+        // existing function names.
+        const SE_UNIVER_SHARED_PRINT_GEN_URL = `${SE_UNIVER_SHARED_BASE}/print/pdf-generator.js`;
+        const printGenState = { loaded: false, loadingPromise: null };
+        function loadPrintPdfGeneratorAssets() {
+            if (printGenState.loaded) return Promise.resolve();
+            if (printGenState.loadingPromise) return printGenState.loadingPromise;
+            printGenState.loadingPromise = _loadUniverScript(SE_UNIVER_SHARED_PRINT_GEN_URL).then(() => {
+                if (!window.SeShared || !window.SeShared.print || !window.SeShared.print.pdfGenerator) {
+                    throw new Error('SeShared.print.pdfGenerator global missing after script load');
+                }
+                printGenState.loaded = true;
+            });
+            return printGenState.loadingPromise.catch(err => {
+                printGenState.loadingPromise = null;
                 throw err;
             });
         }
