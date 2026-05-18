@@ -3150,6 +3150,34 @@
             });
         }
 
+        // ===== se-univer-shared modules =====
+        // Shared helper hub pinned to a git commit SHA (NOT a tag — jsDelivr
+        // takes 5-30 min to mirror new tags, but commit SHAs work
+        // immediately). Bump `SE_UNIVER_SHARED_SHA` when adopting newer
+        // versions; see ADOPTION_BRIEF_FOR_OTHER_PROJECTS.md in
+        // https://github.com/sesurvey-ai/se-univer-shared
+        const SE_UNIVER_SHARED_SHA = '34545b0';  // v1.5.1
+        const SE_UNIVER_SHARED_BASE = `https://cdn.jsdelivr.net/gh/sesurvey-ai/se-univer-shared@${SE_UNIVER_SHARED_SHA}`;
+
+        // file-io/pickers — File System Access wrappers + <input>/download
+        // fallbacks for Firefox / Safari / Brave-with-FSA-disabled.
+        const SE_UNIVER_SHARED_FILEIO_URL = `${SE_UNIVER_SHARED_BASE}/file-io/pickers.js`;
+        const fileIoState = { loaded: false, loadingPromise: null };
+        function loadFileIoPickersAssets() {
+            if (fileIoState.loaded) return Promise.resolve();
+            if (fileIoState.loadingPromise) return fileIoState.loadingPromise;
+            fileIoState.loadingPromise = _loadUniverScript(SE_UNIVER_SHARED_FILEIO_URL).then(() => {
+                if (!window.SeShared || !window.SeShared.fileIo || !window.SeShared.fileIo.pickers) {
+                    throw new Error('SeShared.fileIo.pickers global missing after script load');
+                }
+                fileIoState.loaded = true;
+            });
+            return fileIoState.loadingPromise.catch(err => {
+                fileIoState.loadingPromise = null;
+                throw err;
+            });
+        }
+
         // Load the base UMD bundle (react/reactDom/rxjs + the
         // @univerjs/presets shim that defines UniverPresets + UniverCore).
         // Idempotent — safe to await once per enterMode. Both Sheets and
@@ -4012,6 +4040,7 @@
             if (!sheetState.fileHandle || !sheetState.fileKind) {
                 return saveSheetAs();
             }
+            await loadFileIoPickersAssets();
             try {
                 // Docs mode only ever writes JSON; the xlsx branch is
                 // sheets-only. Force-coerce here in case a stale handle
@@ -4029,7 +4058,7 @@
                     alert('Sheet ว่างเปล่า');
                     return;
                 }
-                await writeBlobToHandle(sheetState.fileHandle, blob);
+                await SeShared.fileIo.pickers.writeBlobToHandle(sheetState.fileHandle, blob);
                 setSheetDirty(false);
                 setSheetStatus(
                     `บันทึก: ${sheetState.fileName} `
@@ -4040,7 +4069,7 @@
                 // re-route to Save As so the user can pick the file
                 // again (Chrome can't always recover an old handle once
                 // its cached state is out of sync with disk).
-                if (isStaleHandleError(e)) {
+                if (SeShared.fileIo.pickers.isStaleHandleError(e)) {
                     console.warn('handle stale, falling back to Save As:', e);
                     const stalefileName = sheetState.fileName;
                     setSheetOverlay(false);
@@ -4070,6 +4099,7 @@
                     : 'ยังไม่มี workbook ให้บันทึก');
                 return;
             }
+            await loadFileIoPickersAssets();
             const isDocsMode = sheetState.mode === 'docs';
             try {
                 if (window.showSaveFilePicker) {
@@ -4116,7 +4146,7 @@
                         alert('Sheet ว่างเปล่า');
                         return;
                     }
-                    await writeBlobToHandle(handle, blob);
+                    await SeShared.fileIo.pickers.writeBlobToHandle(handle, blob);
                     setSheetFile(handle, f.name, kind);
                     setSheetDirty(false);
                     setSheetStatus(
@@ -4980,95 +5010,24 @@
             }
         }
 
-        // Write a blob to a FileSystemFileHandle, requesting readwrite
-        // permission if needed. Browsers prompt the user on first use —
-        // subsequent saves in the same tab go through silently.
-        async function writeBlobToHandle(handle, blob) {
-            if (handle.queryPermission) {
-                let perm = await handle.queryPermission({ mode: 'readwrite' });
-                if (perm !== 'granted') {
-                    perm = await handle.requestPermission({ mode: 'readwrite' });
-                    if (perm !== 'granted') {
-                        throw new Error('ไม่ได้รับสิทธิ์เขียนไฟล์');
-                    }
-                }
-            }
-            // Refresh the handle's cached metadata before opening the
-            // writable. Without this, a stale mtime/size from a previous
-            // read can trigger:
-            //   "InvalidStateError: An operation that depends on state
-            //    cached in an interface object was made but the state had
-            //    changed since it was read from disk."
-            // A no-op getFile() round-trip is enough to re-sync.
-            try {
-                if (handle.getFile) await handle.getFile();
-            } catch {}
-            const writable = await handle.createWritable();
-            try {
-                await writable.write(blob);
-            } finally {
-                await writable.close();
-            }
-        }
-
-        // Recognises the "stale handle" InvalidStateError so callers can
-        // gracefully fall back to a Save As re-prompt instead of just
-        // surfacing the cryptic browser message to the user.
-        function isStaleHandleError(e) {
-            if (!e) return false;
-            if (e.name === 'InvalidStateError') return true;
-            return /state cached/i.test(e.message || '');
-        }
-
-        // Legacy fallback file picker for browsers without FS Access API
-        // (Firefox, Safari). Returns a File with no handle attached.
-        function pickFileViaInput() {
-            return new Promise((resolve) => {
-                const input = document.createElement('input');
-                input.type = 'file';
-                input.accept = FILE_ACCEPT_LIST.join(',');
-                input.style.display = 'none';
-                input.addEventListener('change', () => {
-                    const f = input.files && input.files[0];
-                    document.body.removeChild(input);
-                    resolve(f || null);
-                });
-                document.body.appendChild(input);
-                input.click();
-            });
-        }
-
         async function openSheetFile() {
             if (sheetState.dirty && !confirm('มีการแก้ไขที่ยังไม่ได้บันทึก — เปิดไฟล์ใหม่จะทับของเดิม\n\nต้องการต่อ?')) return;
 
+            await loadFileIoPickersAssets();
+
             const isDocsMode = sheetState.mode === 'docs';
 
-            // Prefer File System Access API — gives us a FileSystemFileHandle
-            // we can later use for in-place Save. Falls back to <input> on
-            // Firefox/Safari which don't expose showOpenFilePicker (those
-            // browsers still get the legacy download-on-save path).
-            let file = null;
-            let handle = null;
-            if (window.showOpenFilePicker) {
-                try {
-                    // Docs mode only accepts .univer.json (no xlsx import yet).
-                    const types = isDocsMode ? FS_TYPES_OPEN_DOCS : FS_TYPES_OPEN;
-                    const [h] = await window.showOpenFilePicker({
-                        types,
-                        multiple: false,
-                        excludeAcceptAllOption: false,
-                    });
-                    handle = h;
-                    file = await h.getFile();
-                } catch (e) {
-                    if (e && e.name === 'AbortError') return;
-                    console.warn('showOpenFilePicker failed, falling back to <input>:', e);
-                }
-            }
-            if (!file) {
-                file = await pickFileViaInput();
-                if (!file) return;
-            }
+            // Shared picker auto-dispatches: FSA on Chrome/Edge (returns a
+            // FileSystemFileHandle for later in-place Save), <input> on
+            // Firefox/Safari/Brave-with-FSA-disabled (handle stays null,
+            // so saves fall through to the download path).
+            const r = await SeShared.fileIo.pickers.openFile({
+                types: isDocsMode ? FS_TYPES_OPEN_DOCS : FS_TYPES_OPEN,
+                accept: FILE_ACCEPT_LIST.join(','),
+            });
+            if (r.cancelled || !r.file) return;
+            const file = r.file;
+            const handle = r.handle || null;
 
             try {
                 setSheetOverlay(true, `กำลังอ่านไฟล์ ${file.name}...`);
