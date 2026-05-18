@@ -2485,6 +2485,7 @@
                     setSheetOverlay(true, 'กำลังโหลด jsPDF + ฟอนต์ไทย (~370 KB)...');
                 }
                 await loadJsPdfAssets();
+                if (!returnBlobOnly) await loadPrintPreviewAssets();
                 if (!returnBlobOnly) {
                     setSheetOverlay(true, 'กำลังสร้าง PDF...');
                 }
@@ -2861,50 +2862,20 @@
 
                 const blob = doc.output('blob');
                 if (returnBlobOnly) return blob;
-                const url = URL.createObjectURL(blob);
                 const baseName = (sheet.name || 'Sheet1')
                     .replace(/[^\w฀-๿]+/g, '_') || 'Sheet';
                 const filename = `SE_Report_${baseName}_${tsForFilename()}.pdf`;
-                // Open the PDF in a new tab and trigger its print
-                // dialog automatically. window.print() inside the
-                // popup is allowed because we hold a same-window
-                // reference (the popup was opened by us, not loaded
-                // independently). Chrome's PDF viewer prints the PDF
-                // itself, not the blank wrapper page.
-                const win = window.open(url, '_blank');
-                if (win) {
-                    // Poll for the popup to finish loading (the PDF
-                    // viewer's load event isn't always reliable across
-                    // browsers). Then trigger print().
-                    const trigger = () => {
-                        try { win.focus(); win.print(); }
-                        catch (e) { console.warn('popup.print failed:', e); }
-                    };
-                    if (win.document && win.document.readyState === 'complete') {
-                        setTimeout(trigger, 300);
-                    } else {
-                        win.addEventListener('load', () => setTimeout(trigger, 300));
-                        // Safety net: also try after a fixed delay in
-                        // case load never fires (PDF viewer quirks).
-                        setTimeout(trigger, 1500);
-                    }
-                    setTimeout(() => URL.revokeObjectURL(url), 60000);
-                    return;
+                // Shared module: opens the PDF in a new tab and triggers
+                // its print dialog. Falls back to <a download> when the
+                // popup is blocked (usually because the user-activation
+                // gesture expired during loadJsPdfAssets).
+                const r = SeShared.print.preview.printPdfBlob(blob, { filename });
+                if (r && r.method === 'download') {
+                    setSheetStatus(
+                        `บันทึก PDF ลง Downloads: ${filename} `
+                        + `(เปิดแท็บใหม่ไม่ได้ — Browser block popup)`
+                    );
                 }
-                // Popup blocked (rare — typically when the gesture
-                // expired during loadJsPdfAssets). Fall back to a
-                // download so the user still gets the file.
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = filename;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                setSheetStatus(
-                    `บันทึก PDF ลง Downloads: ${filename} `
-                    + `(เปิดแท็บใหม่ไม่ได้ — Browser block popup)`
-                );
-                setTimeout(() => URL.revokeObjectURL(url), 10000);
             } catch (e) {
                 console.error(e);
                 if (returnBlobOnly) return null;
@@ -2935,19 +2906,30 @@
         // printActiveView so the keyboard shortcut and the toolbar
         // button produce the same output, regardless of which view is
         // active.
-        document.addEventListener('keydown', (e) => {
-            const isPrintKey = (e.ctrlKey || e.metaKey)
-                && !e.altKey && !e.shiftKey
-                && (e.key === 'p' || e.key === 'P');
-            if (!isPrintKey) return;
-            // Print is sheets-only. In docs mode (or on the launcher) let
-            // the native browser dialog handle Ctrl+P — there's no Page
-            // Setup pipeline for docs.
-            if (sheetState.mode !== 'sheets') return;
-            e.preventDefault();
-            e.stopPropagation();
-            printActiveView();
-        }, true);  // capture phase so we beat any nested handler
+        //
+        // The shared interceptor swallows Ctrl+P unconditionally; the
+        // mode check inside the handler decides whether to route to
+        // Page Setup or fall back to the native dialog. Lazy-load the
+        // module on first DOMContentLoaded — fire-and-forget; it's not
+        // a hard dependency and Ctrl+P is rare enough that a brief
+        // interval where it falls through to native is acceptable.
+        loadPrintPreviewAssets().then(() => {
+            SeShared.print.preview.interceptPrintShortcut(() => {
+                // Print is sheets-only. In docs mode (or on the launcher)
+                // let the native browser dialog handle Ctrl+P — there's
+                // no Page Setup pipeline for docs.
+                if (sheetState.mode !== 'sheets') {
+                    // Signal "did not handle" by re-firing the default —
+                    // but the shared module preventDefault'd already, so
+                    // we just no-op. Trade-off: in docs mode Ctrl+P is
+                    // silent. Acceptable since printing docs is unsupported
+                    // (alert in printActiveView would surface it on the
+                    // toolbar Print button anyway).
+                    return;
+                }
+                printActiveView();
+            });
+        }).catch(e => console.warn('print/preview Ctrl+P interceptor load failed:', e));
 
         function setSheetStatus(msg) {
             const el = document.getElementById('sheetStatus');
@@ -3174,6 +3156,27 @@
             });
             return fileIoState.loadingPromise.catch(err => {
                 fileIoState.loadingPromise = null;
+                throw err;
+            });
+        }
+
+        // print/preview — popup window.open + popup.print() with popup-
+        // blocker fallback to <a download>. Also exposes a Ctrl+P / Cmd+P
+        // interceptor for canvas-based views where @media print returns
+        // a blank page.
+        const SE_UNIVER_SHARED_PRINT_PREVIEW_URL = `${SE_UNIVER_SHARED_BASE}/print/preview.js`;
+        const printPreviewState = { loaded: false, loadingPromise: null };
+        function loadPrintPreviewAssets() {
+            if (printPreviewState.loaded) return Promise.resolve();
+            if (printPreviewState.loadingPromise) return printPreviewState.loadingPromise;
+            printPreviewState.loadingPromise = _loadUniverScript(SE_UNIVER_SHARED_PRINT_PREVIEW_URL).then(() => {
+                if (!window.SeShared || !window.SeShared.print || !window.SeShared.print.preview) {
+                    throw new Error('SeShared.print.preview global missing after script load');
+                }
+                printPreviewState.loaded = true;
+            });
+            return printPreviewState.loadingPromise.catch(err => {
+                printPreviewState.loadingPromise = null;
                 throw err;
             });
         }
