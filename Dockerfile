@@ -7,6 +7,3 @@ RUN rm -f index.html
 COPY index.html Sheets.png Doc.png ./
 
 EXPOSE 80
-
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget -q --spider http://localhost/ || exit 1
