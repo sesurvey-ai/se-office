@@ -4529,6 +4529,84 @@
             return stylesPerSheet;
         }
 
+        // Thai Excel BE (Buddhist Era) date handling. Excel set to Thai
+        // locale auto-coerces text dates like "16/05/2569" into date
+        // serials and renders years +543 from CE. Univer's formula engine
+        // is strict and doesn't do either, so we pre-process on import.
+        // See XLSX_THAI_BE_IMPORT.md for the full rationale.
+        const THAI_BE_SERIAL_OFFSET = 198332;  // 543 years in days
+        const THAI_MONTH_NAMES = {
+            'ม.ค.':1,'มกราคม':1,'มค':1,
+            'ก.พ.':2,'กุมภาพันธ์':2,'กพ':2,
+            'มี.ค.':3,'มีนาคม':3,'มีค':3,
+            'เม.ย.':4,'เมษายน':4,'เมย':4,
+            'พ.ค.':5,'พฤษภาคม':5,'พค':5,
+            'มิ.ย.':6,'มิถุนายน':6,'มิย':6,
+            'ก.ค.':7,'กรกฎาคม':7,'กค':7,
+            'ส.ค.':8,'สิงหาคม':8,'สค':8,
+            'ก.ย.':9,'กันยายน':9,'กย':9,
+            'ต.ค.':10,'ตุลาคม':10,'ตค':10,
+            'พ.ย.':11,'พฤศจิกายน':11,'พย':11,
+            'ธ.ค.':12,'ธันวาคม':12,'ธค':12,
+        };
+        // True if the format pattern is for a date/time. Strips quoted
+        // literals + escaped chars so e.g. `"date"#,##0` doesn't trigger
+        // on the literal 'd' inside the quoted text.
+        function isDateFormatPattern(pattern) {
+            if (!pattern) return false;
+            const cleaned = pattern
+                .replace(/"[^"]*"/g, '')
+                .replace(/\\./g, '');
+            return /[yYdD]/.test(cleaned);
+        }
+        // Try to parse a Thai BE date string into an Excel serial number.
+        // Returns null if the input doesn't match any supported format.
+        function tryParseThaiBEDateText(text) {
+            let d, mo, year, rest, m;
+            // Format A: dd[sep]mm[sep]yy(yy) with sep = / - .
+            m = /^\s*(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})(.*)$/.exec(text);
+            if (m) {
+                d = +m[1]; mo = +m[2]; year = +m[3]; rest = m[4];
+            } else {
+                // Format B: yyyy[sep]mm[sep]dd
+                m = /^\s*(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})(.*)$/.exec(text);
+                if (m) {
+                    year = +m[1]; mo = +m[2]; d = +m[3]; rest = m[4];
+                } else {
+                    // Format C: dd ThaiMonthName yy(yy)
+                    m = /^\s*(\d{1,2})\s+(\S+)\s+(\d{2,4})(.*)$/.exec(text);
+                    if (m && THAI_MONTH_NAMES[m[2]] != null) {
+                        d = +m[1]; mo = THAI_MONTH_NAMES[m[2]];
+                        year = +m[3]; rest = m[4];
+                    } else {
+                        return null;
+                    }
+                }
+            }
+            // 2-digit year → assume Buddhist 25xx (CE 1957-2056 range)
+            if (year < 100) year += 2500;
+            if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+            if (year < 1900 || year > 2900) return null;
+            // Optional time suffix " HH:MM" or " HH:MM:SS"
+            let hour = 0, min = 0, sec = 0;
+            const trimmedRest = rest.trim();
+            if (trimmedRest.length > 0) {
+                const tm = /^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?$/.exec(trimmedRest);
+                if (!tm) return null;
+                hour = +tm[1]; min = +tm[2]; sec = tm[3] ? +tm[3] : 0;
+                if (hour > 23 || min > 59 || sec > 59) return null;
+            }
+            // Year heuristic: >=2400 → BE (subtract 543); else CE as-is.
+            const ceYear = year >= 2400 ? year - 543 : year;
+            const dateMs = Date.UTC(ceYear, mo - 1, d);
+            // Excel epoch 1899-12-30: Lotus-1900-leap-bug cancels out for
+            // any date >= 1900-03-01, so raw day count matches Excel.
+            const epochMs = Date.UTC(1899, 11, 30);
+            const daySerial = Math.round((dateMs - epochMs) / 86400000);
+            const timeFraction = (hour * 3600 + min * 60 + sec) / 86400;
+            return daySerial + timeFraction;
+        }
+
         // Convert a SheetJS workbook (XLSX.read result) into the same
         // IWorkbookData shape Univer expects. Preserves cell values + types
         // + formulas + merged cells; SheetJS community edition strips cell
@@ -4559,17 +4637,44 @@
                         const cell = ws[addr];
                         if (!cell) continue;
                         const v = cell.v;
-                        if (v === null || v === undefined || v === '') continue;
+                        // SheetJS sheetStubs=true marks formula-only cells
+                        // as t='z' with filler v=0; treat those as
+                        // "no cached value" so Univer recomputes on mount.
+                        const isStub = cell.t === 'z';
+                        const hasValue = !isStub
+                            && !(v === null || v === undefined || v === '');
+                        // Skip only when nothing of interest survives —
+                        // empty cell with no formula and no number format
+                        // contributes nothing to the import.
+                        if (!hasValue && !cell.f && !cell.z) continue;
                         if (!cellData[r]) cellData[r] = {};
-                        const isNum = typeof v === 'number' && Number.isFinite(v);
-                        const cellObj = {
-                            v: isNum ? v : String(v),
-                            t: isNum ? UNIVER_T_NUMBER : UNIVER_T_STRING,
-                        };
+                        let cellObj;
+                        if (hasValue) {
+                            const isNum = typeof v === 'number' && Number.isFinite(v);
+                            cellObj = {
+                                v: isNum ? v : String(v),
+                                t: isNum ? UNIVER_T_NUMBER : UNIVER_T_STRING,
+                            };
+                        } else {
+                            // CRITICAL: omit `v` and `t` entirely for
+                            // formula-only cells. Setting v=0 or v=''
+                            // makes Univer's formula engine treat it as
+                            // a cached result and skip recompute, leaving
+                            // the cell blank on mount.
+                            cellObj = {};
+                        }
                         // Preserve formulas. SheetJS strips the leading '=';
                         // Univer's formula engine wants it included.
                         if (cell.f) {
                             cellObj.f = cell.f.startsWith('=') ? cell.f : '=' + cell.f;
+                        }
+                        // Preserve numFmt pattern from cellNF=true read.
+                        // Univer's numfmt plugin consumes Excel format
+                        // codes directly through s.n.pattern.
+                        if (cell.z && cell.z !== 'General') {
+                            cellObj.s = Object.assign({}, cellObj.s, {
+                                n: { pattern: cell.z },
+                            });
                         }
                         cellData[r][c] = cellObj;
                         if (r > maxR) maxR = r;
@@ -4695,6 +4800,85 @@
                     }
                 } catch (e) {
                     console.warn('extractExcelTablesFromXlsx failed:', e);
+                }
+            }
+
+            // Layer 4 — Thai Buddhist Era date conversion.
+            // Excel set to Thai locale stores dates differently from
+            // Univer's strict engine: text "16/05/2569" wants to coerce
+            // to a date serial, and yyyy patterns should render BE years.
+            // Two passes:
+            //   1. Convert text BE dates → numeric serials (Case A) and
+            //      detect numeric cells already holding Thai-encoded
+            //      serials (CE serial + 198332, Case B). Track whether
+            //      we saw any BE input so we know to propagate the BE
+            //      display to formula-result cells later.
+            //   2. If anything was BE, translate every date-format
+            //      pattern's `yyyy/yy` → `bbbb/bb` so inputs AND outputs
+            //      render consistently in BE.
+            let hasThaiDates = false;
+            for (const sid of sheetOrder) {
+                const cellData = sheets[sid].cellData;
+                for (const rk of Object.keys(cellData)) {
+                    const row = cellData[rk];
+                    for (const ck of Object.keys(row)) {
+                        const cell = row[ck];
+                        // Case A: text that parses as a Thai BE date
+                        if (cell.t === UNIVER_T_STRING
+                            && typeof cell.v === 'string') {
+                            const serial = tryParseThaiBEDateText(cell.v);
+                            if (serial === null) continue;
+                            cell.v = serial;
+                            cell.t = UNIVER_T_NUMBER;
+                            hasThaiDates = true;
+                            const existingPattern = cell.s && cell.s.n
+                                && cell.s.n.pattern;
+                            cell.s = Object.assign({}, cell.s, {
+                                n: { pattern: existingPattern || 'dd/mm/bbbb' },
+                            });
+                            continue;
+                        }
+                        // Case B: numeric cell with Thai-encoded serial.
+                        // Thai Excel writes 244485 for 16/05/2569 BE
+                        // (= CE serial 46153 + 198332 offset). Normal CE
+                        // serials top out around 75k (year 2105); the
+                        // Thai BE band starts at ~198333 (year 1900) →
+                        // no overlap, safe to detect by range + format.
+                        if (cell.t === UNIVER_T_NUMBER
+                            && typeof cell.v === 'number'
+                            && cell.v >= 198000 && cell.v <= 310000) {
+                            const pat = cell.s && cell.s.n && cell.s.n.pattern;
+                            if (!isDateFormatPattern(pat)) continue;
+                            cell.v = cell.v - THAI_BE_SERIAL_OFFSET;
+                            hasThaiDates = true;
+                        }
+                    }
+                }
+            }
+            // Pattern translation: if any cell was BE, propagate BE
+            // display to all date cells (including formula results that
+            // inherited the yyyy pattern from Excel). Otherwise mixed
+            // BE-input + CE-output is confusing.
+            if (hasThaiDates) {
+                for (const sid of sheetOrder) {
+                    const cellData = sheets[sid].cellData;
+                    for (const rk of Object.keys(cellData)) {
+                        const row = cellData[rk];
+                        for (const ck of Object.keys(row)) {
+                            const cell = row[ck];
+                            const pat = cell.s && cell.s.n
+                                && cell.s.n.pattern;
+                            if (!pat) continue;
+                            const newPat = pat
+                                .replace(/yyyy/g, 'bbbb')
+                                .replace(/yy/g, 'bb');
+                            if (newPat !== pat) {
+                                cell.s = Object.assign({}, cell.s, {
+                                    n: { pattern: newPat },
+                                });
+                            }
+                        }
+                    }
                 }
             }
 
@@ -4904,7 +5088,18 @@
                     await loadSheetJsAssets();
                     setSheetOverlay(true, `กำลังอ่าน ${file.name}...`);
                     const buf = await file.arrayBuffer();
-                    const wb = XLSX.read(buf, { type: 'array' });
+                    // sheetStubs: keep cells that have only <f>FORMULA</f>
+                    // with empty <v> (Excel files saved with
+                    // fullCalcOnLoad=1 don't cache values — SheetJS would
+                    // otherwise drop them and Univer would see 0 formulas).
+                    // cellNF: populate cell.z with the resolved format
+                    // pattern (e.g. "dd/mm/yyyy") so we can preserve it
+                    // through to Univer's numfmt plugin.
+                    const wb = XLSX.read(buf, {
+                        type: 'array',
+                        sheetStubs: true,
+                        cellNF: true,
+                    });
                     data = await xlsxWorkbookToUniver(wb, file.name, buf);
                 } else {
                     const text = await file.text();
