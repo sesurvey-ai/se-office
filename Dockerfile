@@ -1,9 +1,12 @@
 FROM nginx:1.27-alpine
 
-# Use the default nginx config that ships with the image — it serves
-# /usr/share/nginx/html with index.html as the default. Our custom
-# nginx.conf is kept in the repo (gzip + cache headers + SPA fallback)
-# but not loaded yet while we stabilize the Dokploy + Swarm deploy.
+# Custom config layers on:
+#   - gzip (index.html 250 KB → ~50 KB on the wire)
+#   - cache headers (index.html 5 min, PNGs 1 year immutable)
+#   - SPA fallback (try_files → /index.html) — required by the
+#     History API routing in the app, otherwise /sheets and /docs
+#     404 on hard refresh
+COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 WORKDIR /usr/share/nginx/html
 RUN rm -f index.html

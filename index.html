@@ -3680,21 +3680,25 @@
             }
         }
 
-        // ---- Hash-based routing -----------------------------------------
+        // ---- History API routing ----------------------------------------
         // Three named paths drive the app — bookmarkable, refresh-safe, and
         // browser-history aware. Each card click + the Home ribbon button
-        // route through navigateTo() which sets location.hash; the single
-        // hashchange listener below is the only thing that actually mounts
-        // / disposes Univer. That keeps the back/forward buttons in sync
-        // with the UI without us having to manually push state.
+        // route through navigateTo() which calls history.pushState(); the
+        // single popstate listener below handles browser back/forward.
+        // Both code paths funnel into _handleRouteChange() which is the
+        // only thing that actually mounts / disposes Univer.
+        //
+        // Server requirement: nginx must SPA-fallback unknown paths to
+        // index.html so a hard refresh on /sheets returns the app (nginx.conf
+        // has try_files $uri $uri/ /index.html for this).
         const ROUTES = {
-            HOME:   '#/',
-            SHEETS: '#/sheets',
-            DOCS:   '#/docs',
+            HOME:   '/',
+            SHEETS: '/sheets',
+            DOCS:   '/docs',
         };
-        function _routeToMode(hash) {
-            if (hash === ROUTES.SHEETS) return 'sheets';
-            if (hash === ROUTES.DOCS)   return 'docs';
+        function _routeToMode(pathname) {
+            if (pathname === ROUTES.SHEETS) return 'sheets';
+            if (pathname === ROUTES.DOCS)   return 'docs';
             return null; // home / unknown
         }
         function _modeToRoute(mode) {
@@ -3702,31 +3706,32 @@
             if (mode === 'docs')   return ROUTES.DOCS;
             return ROUTES.HOME;
         }
-        // Tracks the hash we last saw apply cleanly so that a "cancel" on
+        function _currentPath() {
+            return location.pathname || ROUTES.HOME;
+        }
+        // Tracks the path we last saw apply cleanly so that a "cancel" on
         // the dirty-prompt during a browser-back can roll the URL back
-        // without re-triggering hashchange (history.replaceState bypasses
-        // the event but still updates the address bar).
-        let _lastAppliedHash = ROUTES.HOME;
-        // True for the brief window where we are about to set the hash
+        // via history.replaceState (which doesn't refire popstate).
+        let _lastAppliedPath = ROUTES.HOME;
+        // True for the brief window where we are about to push state
         // ourselves — distinguishes our own navigation (already gated on
         // dirty) from external back/forward navigation that still needs
         // a confirm prompt.
         let _navigatingProgrammatically = false;
 
         // Public API: switch route. Confirms once if there are unsaved
-        // edits; on accept, writes the hash and lets hashchange do the
-        // mount/dispose work.
+        // edits; on accept, pushes the path and runs the route handler.
+        // pushState does NOT fire popstate so we call _handleRouteChange
+        // manually right after.
         function navigateTo(mode) {
             const target = _modeToRoute(mode);
-            if (location.hash === target ||
-                (target === ROUTES.HOME && (location.hash === '' || location.hash === '#'))) {
-                return;
-            }
+            if (_currentPath() === target) return;
             if (sheetState.dirty && !confirm(
                 'มีการแก้ไขที่ยังไม่ได้บันทึก — ออกจาก editor จะเสีย\n\nต้องการต่อ?'
             )) return;
             _navigatingProgrammatically = true;
-            location.hash = target;
+            history.pushState(null, '', target);
+            _handleRouteChange();
         }
 
         // Back-compat shims for callers that pre-date the routing layer.
@@ -3736,27 +3741,27 @@
         function goHome()          { navigateTo(null); }
         function enterMode(mode)   { navigateTo(mode); }
 
-        window.addEventListener('hashchange', () => {
-            const targetMode  = _routeToMode(location.hash || ROUTES.HOME);
+        function _handleRouteChange() {
+            const targetMode  = _routeToMode(_currentPath());
             const currentMode = sheetState.mode;
             if (targetMode === currentMode) {
                 _navigatingProgrammatically = false;
-                _lastAppliedHash = location.hash || ROUTES.HOME;
+                _lastAppliedPath = _currentPath();
                 return;
             }
             // Browser back/forward path — navigateTo wasn't involved, so
             // dirty wasn't gated yet. Confirm here; on cancel, roll the
-            // URL back without re-firing hashchange.
+            // URL back without re-firing popstate (replaceState is silent).
             if (!_navigatingProgrammatically && sheetState.dirty) {
                 if (!confirm(
                     'มีการแก้ไขที่ยังไม่ได้บันทึก — ออกจากหน้านี้จะเสีย\n\nต้องการต่อ?'
                 )) {
-                    history.replaceState(null, '', _lastAppliedHash);
+                    history.replaceState(null, '', _lastAppliedPath);
                     return;
                 }
             }
             _navigatingProgrammatically = false;
-            _lastAppliedHash = location.hash || ROUTES.HOME;
+            _lastAppliedPath = _currentPath();
             // Dispose previous mount first when switching mode-to-mode;
             // _doEnterMode itself doesn't tear down the prior Univer.
             if (currentMode && targetMode !== currentMode) _doGoHome();
@@ -3765,7 +3770,8 @@
             } else {
                 _doGoHome();
             }
-        });
+        }
+        window.addEventListener('popstate', _handleRouteChange);
 
         // Minimum-viable IWorkbookData for a blank Sheet1. Mirrors the
         // shape recordsToUniverWorkbook returns (so mountUniver doesn't
@@ -4939,24 +4945,24 @@
         });
 
         // ========== STANDALONE INIT ==========
-        // Launcher-first UX with hash-based routing:
-        //   #/         → launcher (Sheets + Docs cards)
-        //   #/sheets   → Sheets editor
-        //   #/docs     → Documents editor
-        // The initial hash is honored on page load — bookmarks and refresh
-        // land back on the same view. Card clicks + Home button set the
-        // hash; the hashchange listener (above) handles the actual mount.
-        const _initialMode = _routeToMode(location.hash || ROUTES.HOME);
+        // Launcher-first UX with History API routing:
+        //   /          → launcher (Sheets + Docs cards)
+        //   /sheets    → Sheets editor
+        //   /docs      → Documents editor
+        // The initial path is honored on page load — bookmarks and refresh
+        // land back on the same view (requires nginx SPA fallback). Card
+        // clicks + Home button pushState; popstate handles back/forward.
+        const _initialMode = _routeToMode(_currentPath());
         if (_initialMode) {
-            _lastAppliedHash = location.hash;
+            _lastAppliedPath = _currentPath();
             _doEnterMode(_initialMode);
         } else {
-            // Normalize empty / unknown hash to '#/' so back/forward has
-            // a stable home entry. replaceState avoids firing hashchange.
-            if (location.hash !== ROUTES.HOME) {
+            // Normalize unknown paths to '/' so back/forward has a stable
+            // home entry. replaceState is silent (no popstate fired).
+            if (_currentPath() !== ROUTES.HOME) {
                 history.replaceState(null, '', ROUTES.HOME);
             }
-            _lastAppliedHash = ROUTES.HOME;
+            _lastAppliedPath = ROUTES.HOME;
             showLauncher();
         }
         document.querySelectorAll('#launcher .launcher-card').forEach((card) => {
