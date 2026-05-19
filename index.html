@@ -2536,6 +2536,16 @@
             if (launcher) launcher.style.display = 'flex';
             if (sv) sv.style.display = 'none';
             _setAppTitleForMode(null);
+            // Fire-and-forget preload of Univer sheets assets while the
+            // user is reading the launcher cards — by the time they
+            // click Sheets, loadUniverAssets() finds the cached promise
+            // already resolved and returns synchronously. Single-flight
+            // inside the loader makes repeat calls (Home button, back
+            // nav) cheap no-ops. The .catch swallows transient CDN
+            // errors so a failed preload doesn't surface as an unhandled
+            // rejection — the real click-time loadUniverAssets() will
+            // retry and surface any persistent failure to the user.
+            loadUniverAssets('sheets').catch(() => {});
         }
 
         // Tear down the current Univer instance + state and return to the
