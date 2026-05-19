@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Univer Spreadsheet</title>
+    <title>SE Office</title>
     <!-- IBM Plex used by the Page Setup modal's "Print UI" design. -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -2519,6 +2519,10 @@
         // preset stack and mounts a blank document. Home button in the
         // Univer ribbon round-trips back to the launcher via goHome().
         function _setAppTitleForMode(mode) {
+            // Browser tab title — short, matches launcher card labels.
+            document.title = mode === 'docs' ? 'SE Docs'
+                           : mode === 'sheets' ? 'SE Sheets'
+                           : 'SE Office';
             const t = document.getElementById('appTitle');
             if (!t) return;
             t.textContent = mode === 'docs' ? 'SE OFFICE — Documents'
