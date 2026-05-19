@@ -1646,6 +1646,13 @@
                             if (us.bl && us.it) data.cell.styles.fontStyle = 'bolditalic';
                             else if (us.bl) data.cell.styles.fontStyle = 'bold';
                             else if (us.it) data.cell.styles.fontStyle = 'italic';
+                            // Per-cell font size — Univer stores us.fs in pt.
+                            // Multiply by the same `scale` factor used for the
+                            // base fontSize so fit-to-page shrinks user-set
+                            // sizes too. Floor at 4pt to match the base floor.
+                            if (typeof us.fs === 'number' && us.fs > 0) {
+                                data.cell.styles.fontSize = Math.max(4, us.fs * scale);
+                            }
                             const H = { 1: 'left', 2: 'center', 3: 'right', 4: 'justify' };
                             const V = { 1: 'top', 2: 'middle', 3: 'bottom', 4: 'middle' };
                             if (us.ht && H[us.ht]) data.cell.styles.halign = H[us.ht];
