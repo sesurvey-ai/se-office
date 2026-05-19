@@ -727,6 +727,11 @@
             fileHandle: null,
             fileName: null,
             fileKind: null,
+            // Concurrency guard for save flows. Set while a Save/Save As is
+            // mid-flight so a second click during the (potentially
+            // multi-second) xlsx build doesn't fire a parallel write that
+            // races the first and lands a stale snapshot on disk.
+            saving: false,
         };
 
         // Crosshair highlight is implemented by the @univerjs/sheets-
@@ -1330,6 +1335,10 @@
                 }
                 await loadJsPdfAssets();
                 if (!returnBlobOnly) await loadPrintPreviewAssets();
+                // Flush pending cell editor so a mid-type Print captures
+                // the value the user is currently typing instead of the
+                // pre-edit state — same root cause as the Save fix.
+                await commitActiveCellEdit();
                 if (!returnBlobOnly) {
                     setSheetOverlay(true, 'กำลังสร้าง PDF...');
                 }
@@ -1741,39 +1750,15 @@
                 alert('ยังไม่มี workbook ให้พิมพ์');
                 return;
             }
-            return openPageSetupModal();
-        }
-
-        // Hijack Ctrl+P / Cmd+P so the browser's native print dialog
-        // doesn't dump a blank page for Sheet view (Univer renders to a
-        // <canvas> that @media print can't scrape). Routes through
-        // printActiveView so the keyboard shortcut and the toolbar
-        // button produce the same output, regardless of which view is
-        // active.
-        //
-        // The shared interceptor swallows Ctrl+P unconditionally; the
-        // mode check inside the handler decides whether to route to
-        // Page Setup or fall back to the native dialog. Lazy-load the
-        // module on first DOMContentLoaded — fire-and-forget; it's not
-        // a hard dependency and Ctrl+P is rare enough that a brief
-        // interval where it falls through to native is acceptable.
-        loadPrintPreviewAssets().then(() => {
-            SeShared.print.preview.interceptPrintShortcut(() => {
-                // Print is sheets-only. In docs mode (or on the launcher)
-                // let the native browser dialog handle Ctrl+P — there's
-                // no Page Setup pipeline for docs.
-                if (sheetState.mode !== 'sheets') {
-                    // Signal "did not handle" by re-firing the default —
-                    // but the shared module preventDefault'd already, so
-                    // we just no-op. Trade-off: in docs mode Ctrl+P is
-                    // silent. Acceptable since printing docs is unsupported
-                    // (alert in printActiveView would surface it on the
-                    // toolbar Print button anyway).
-                    return;
-                }
-                printActiveView();
+            // Catch CDN load / init failures in the page-setup module so a
+            // dead network doesn't surface as a silent unhandled rejection
+            // — without this, Print just appears to do nothing and the
+            // user has no way to tell whether to retry.
+            return openPageSetupModal().catch(e => {
+                console.error('openPageSetupModal failed:', e);
+                alert('เปิด Page Setup ไม่สำเร็จ: ' + (e && e.message || e));
             });
-        }).catch(e => console.warn('print/preview Ctrl+P interceptor load failed:', e));
+        }
 
         function setSheetStatus(msg) {
             const el = document.getElementById('sheetStatus');
@@ -2045,6 +2030,43 @@
                 throw err;
             });
         }
+
+        // Hijack Ctrl+P / Cmd+P so the browser's native print dialog
+        // doesn't dump a blank page for Sheet view (Univer renders to a
+        // <canvas> that @media print can't scrape). Routes through
+        // printActiveView so the keyboard shortcut and the toolbar
+        // button produce the same output, regardless of which view is
+        // active.
+        //
+        // Positioned AFTER the SeShared loader declarations above —
+        // calling loadPrintPreviewAssets() earlier hits a TDZ on the
+        // `const printPreviewState` it closes over and throws Uncaught,
+        // which would abort the rest of the script (including the
+        // launcher click bindings at the bottom).
+        //
+        // The shared interceptor swallows Ctrl+P unconditionally; the
+        // mode check inside the handler decides whether to route to
+        // Page Setup or fall back to the native dialog. Lazy-load the
+        // module on first DOMContentLoaded — fire-and-forget; it's not
+        // a hard dependency and Ctrl+P is rare enough that a brief
+        // interval where it falls through to native is acceptable.
+        loadPrintPreviewAssets().then(() => {
+            SeShared.print.preview.interceptPrintShortcut(() => {
+                // Print is sheets-only. In docs mode (or on the launcher)
+                // let the native browser dialog handle Ctrl+P — there's
+                // no Page Setup pipeline for docs.
+                if (sheetState.mode !== 'sheets') {
+                    // Signal "did not handle" by re-firing the default —
+                    // but the shared module preventDefault'd already, so
+                    // we just no-op. Trade-off: in docs mode Ctrl+P is
+                    // silent. Acceptable since printing docs is unsupported
+                    // (alert in printActiveView would surface it on the
+                    // toolbar Print button anyway).
+                    return;
+                }
+                printActiveView();
+            });
+        }).catch(e => console.warn('print/preview Ctrl+P interceptor load failed:', e));
 
         // Load the base UMD bundle (react/reactDom/rxjs + the
         // @univerjs/presets shim that defines UniverPresets + UniverCore).
@@ -2756,10 +2778,43 @@
             return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
         }
 
+        // Force-commit any in-progress cell editor before we snapshot.
+        // Univer keeps typed-but-uncommitted values in the editor's local
+        // state until Enter / Tab / blur fires — and save() / getSnapshot()
+        // do NOT see those pending edits. Without this call, hitting Save
+        // while the user is still mid-type silently writes the pre-edit
+        // workbook to disk and the user reopens to find their data gone.
+        //
+        // eventType 3 = exit-on-keyboard, keycode 13 = Enter; together they
+        // mimic the user pressing Enter to commit. Sheets-only — Univer
+        // Docs has its own editor and the command name is sheets-specific,
+        // so docs mode skips. Failure is non-fatal (older Univer builds may
+        // not have the command yet); fall through and snapshot whatever
+        // state we can.
+        async function commitActiveCellEdit() {
+            if (sheetState.mode !== 'sheets') return;
+            if (!sheetState.univerAPI) return;
+            try {
+                await sheetState.univerAPI.executeCommand(
+                    'sheet.operation.set-cell-edit-visible',
+                    { visible: false, eventType: 3, keycode: 13 }
+                );
+            } catch (e) {
+                console.warn('commitActiveCellEdit failed (continuing):', e);
+            }
+        }
+
         // Pull the latest workbook / document snapshot from Univer's facade
         // API. Branches on sheetState.mode — sheets uses getActiveWorkbook,
         // docs uses getActiveDocument. Falls back to sheetState.currentData
         // if the facade isn't ready (e.g. before first mount).
+        //
+        // Univer renamed FWorkbook.getSnapshot() → FWorkbook.save() and the
+        // old method now logs a deprecation warning AND may return the
+        // original mount snapshot without the user's edits — which silently
+        // saves a blank workbook. Prefer save() when available; fall back
+        // to getSnapshot() only on older Univer builds that haven't shipped
+        // the rename yet.
         function getCurrentUniverSnapshot() {
             if (sheetState.univerAPI) {
                 try {
@@ -2767,17 +2822,19 @@
                         const fDoc = typeof sheetState.univerAPI.getActiveDocument === 'function'
                             ? sheetState.univerAPI.getActiveDocument()
                             : null;
-                        if (fDoc && typeof fDoc.getSnapshot === 'function') {
-                            return fDoc.getSnapshot();
+                        if (fDoc) {
+                            if (typeof fDoc.save === 'function') return fDoc.save();
+                            if (typeof fDoc.getSnapshot === 'function') return fDoc.getSnapshot();
                         }
                     } else {
                         const fWb = sheetState.univerAPI.getActiveWorkbook();
-                        if (fWb && typeof fWb.getSnapshot === 'function') {
-                            return fWb.getSnapshot();
+                        if (fWb) {
+                            if (typeof fWb.save === 'function') return fWb.save();
+                            if (typeof fWb.getSnapshot === 'function') return fWb.getSnapshot();
                         }
                     }
                 } catch (e) {
-                    console.warn('getSnapshot failed:', e);
+                    console.warn('snapshot failed:', e);
                 }
             }
             return sheetState.currentData;
@@ -2905,11 +2962,20 @@
                     : 'ยังไม่มี workbook ให้บันทึก');
                 return;
             }
+            if (sheetState.saving) return;
             if (!sheetState.fileHandle || !sheetState.fileKind) {
                 return saveSheetAs();
             }
-            await loadFileIoPickersAssets();
+            // Keep `saving = true` + the loader call inside try so finally
+            // always resets the flag even if the CDN fetch for the file-io
+            // pickers module rejects. Otherwise the flag would latch on and
+            // every subsequent Save click would early-return silently.
+            sheetState.saving = true;
             try {
+                await loadFileIoPickersAssets();
+                // Flush in-progress cell editor into the workbook state
+                // before snapshotting — see commitActiveCellEdit() docs.
+                await commitActiveCellEdit();
                 // Docs mode only ever writes JSON; the xlsx branch is
                 // sheets-only. Force-coerce here in case a stale handle
                 // somehow surfaces an xlsx kind in docs mode.
@@ -2952,6 +3018,7 @@
                 alert('บันทึกไม่สำเร็จ: ' + (e && e.message || e));
             } finally {
                 setSheetOverlay(false);
+                sheetState.saving = false;
             }
         }
 
@@ -2967,9 +3034,17 @@
                     : 'ยังไม่มี workbook ให้บันทึก');
                 return;
             }
-            await loadFileIoPickersAssets();
+            if (sheetState.saving) return;
+            // Same finally-safety rationale as saveSheetFile — loader call
+            // must live inside try so a CDN failure doesn't leave `saving`
+            // latched on forever.
+            sheetState.saving = true;
             const isDocsMode = sheetState.mode === 'docs';
             try {
+                await loadFileIoPickersAssets();
+                // Same rationale as saveSheetFile — flush any pending cell
+                // editor value before snapshotting.
+                await commitActiveCellEdit();
                 if (window.showSaveFilePicker) {
                     // Suggest the current basename so re-Save-As to a new
                     // path / format starts with something recognizable.
@@ -3069,6 +3144,7 @@
                 alert('บันทึกไม่สำเร็จ: ' + (e && e.message || e));
             } finally {
                 setSheetOverlay(false);
+                sheetState.saving = false;
             }
         }
 
@@ -3738,18 +3814,24 @@
         async function openSheetFile() {
             if (sheetState.dirty && !confirm('มีการแก้ไขที่ยังไม่ได้บันทึก — เปิดไฟล์ใหม่จะทับของเดิม\n\nต้องการต่อ?')) return;
 
-            await loadFileIoPickersAssets();
-
             const isDocsMode = sheetState.mode === 'docs';
 
             // Shared picker auto-dispatches: FSA on Chrome/Edge (returns a
             // FileSystemFileHandle for later in-place Save), <input> on
             // Firefox/Safari/Brave-with-FSA-disabled (handle stays null,
             // so saves fall through to the download path).
-            const r = await SeShared.fileIo.pickers.openFile({
-                types: isDocsMode ? FS_TYPES_OPEN_DOCS : FS_TYPES_OPEN,
-                accept: FILE_ACCEPT_LIST.join(','),
-            });
+            let r;
+            try {
+                await loadFileIoPickersAssets();
+                r = await SeShared.fileIo.pickers.openFile({
+                    types: isDocsMode ? FS_TYPES_OPEN_DOCS : FS_TYPES_OPEN,
+                    accept: FILE_ACCEPT_LIST.join(','),
+                });
+            } catch (e) {
+                console.error(e);
+                alert('เปิดไฟล์ไม่สำเร็จ: ' + (e && e.message || e));
+                return;
+            }
             if (r.cancelled || !r.file) return;
             const file = r.file;
             const handle = r.handle || null;
