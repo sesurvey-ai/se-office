@@ -624,72 +624,20 @@
         document.getElementById('fontDown').addEventListener('click', () => applyFontSize(fontSize - 1));
 
         // ========== SPREADSHEET VIEW (Univer) ==========
-        // Univer (https://univer.ai) ships UMD bundles via unpkg, so we
-        // lazy-load all required scripts on first tab entry. All
-        // persistence is client-side: Save → JSON Blob download,
-        // Open → file picker + FileReader. No backend involvement.
-        const UNIVER_BASE = 'https://unpkg.com';
-        // Base deps shared by every mode (Sheets, Docs, future Slides).
-        // Loaded once at first enterMode + cached forever.
-        const UNIVER_URLS_BASE = {
-            react:        `${UNIVER_BASE}/react@18.3.1/umd/react.production.min.js`,
-            reactDom:     `${UNIVER_BASE}/react-dom@18.3.1/umd/react-dom.production.min.js`,
-            rxjs:         `${UNIVER_BASE}/rxjs/dist/bundles/rxjs.umd.min.js`,
-            presets:      `${UNIVER_BASE}/@univerjs/presets/lib/umd/index.js`,
-        };
-        // Sheets-only assets: core preset + all the feature presets
-        // (filter / sort / find-replace / cf / data-validation / drawing /
-        // hyper-link / note / table) + the crosshair-highlight plugin.
-        const UNIVER_URLS_SHEETS = {
-            core:         `${UNIVER_BASE}/@univerjs/preset-sheets-core/lib/umd/index.js`,
-            coreLocale:   `${UNIVER_BASE}/@univerjs/preset-sheets-core/lib/umd/locales/en-US.js`,
-            filter:       `${UNIVER_BASE}/@univerjs/preset-sheets-filter/lib/umd/index.js`,
-            filterLocale: `${UNIVER_BASE}/@univerjs/preset-sheets-filter/lib/umd/locales/en-US.js`,
-            sort:         `${UNIVER_BASE}/@univerjs/preset-sheets-sort/lib/umd/index.js`,
-            sortLocale:   `${UNIVER_BASE}/@univerjs/preset-sheets-sort/lib/umd/locales/en-US.js`,
-            findReplace:  `${UNIVER_BASE}/@univerjs/preset-sheets-find-replace/lib/umd/index.js`,
-            findReplaceLocale: `${UNIVER_BASE}/@univerjs/preset-sheets-find-replace/lib/umd/locales/en-US.js`,
-            cf:           `${UNIVER_BASE}/@univerjs/preset-sheets-conditional-formatting/lib/umd/index.js`,
-            cfLocale:     `${UNIVER_BASE}/@univerjs/preset-sheets-conditional-formatting/lib/umd/locales/en-US.js`,
-            dataValidation:       `${UNIVER_BASE}/@univerjs/preset-sheets-data-validation/lib/umd/index.js`,
-            dataValidationLocale: `${UNIVER_BASE}/@univerjs/preset-sheets-data-validation/lib/umd/locales/en-US.js`,
-            drawing:              `${UNIVER_BASE}/@univerjs/preset-sheets-drawing/lib/umd/index.js`,
-            drawingLocale:        `${UNIVER_BASE}/@univerjs/preset-sheets-drawing/lib/umd/locales/en-US.js`,
-            hyperLink:            `${UNIVER_BASE}/@univerjs/preset-sheets-hyper-link/lib/umd/index.js`,
-            hyperLinkLocale:      `${UNIVER_BASE}/@univerjs/preset-sheets-hyper-link/lib/umd/locales/en-US.js`,
-            note:                 `${UNIVER_BASE}/@univerjs/preset-sheets-note/lib/umd/index.js`,
-            noteLocale:           `${UNIVER_BASE}/@univerjs/preset-sheets-note/lib/umd/locales/en-US.js`,
-            table:                `${UNIVER_BASE}/@univerjs/preset-sheets-table/lib/umd/index.js`,
-            tableLocale:          `${UNIVER_BASE}/@univerjs/preset-sheets-table/lib/umd/locales/en-US.js`,
-            // Lower-level plugin (no preset bundle, no locale file) — adds
-            // Google-Sheets-style row+column highlight for the active cell.
-            // Registered manually via univer.registerPlugin() in mountUniver.
-            crosshair:            `${UNIVER_BASE}/@univerjs/sheets-crosshair-highlight/lib/umd/index.js`,
-            // CSS for each preset (loaded in parallel as <link>)
-            cssCore:      `${UNIVER_BASE}/@univerjs/preset-sheets-core/lib/index.css`,
-            cssFilter:    `${UNIVER_BASE}/@univerjs/preset-sheets-filter/lib/index.css`,
-            cssSort:      `${UNIVER_BASE}/@univerjs/preset-sheets-sort/lib/index.css`,
-            cssFindReplace: `${UNIVER_BASE}/@univerjs/preset-sheets-find-replace/lib/index.css`,
-            cssCf:        `${UNIVER_BASE}/@univerjs/preset-sheets-conditional-formatting/lib/index.css`,
-            cssDataValidation: `${UNIVER_BASE}/@univerjs/preset-sheets-data-validation/lib/index.css`,
-            cssDrawing:        `${UNIVER_BASE}/@univerjs/preset-sheets-drawing/lib/index.css`,
-            cssHyperLink:      `${UNIVER_BASE}/@univerjs/preset-sheets-hyper-link/lib/index.css`,
-            cssNote:           `${UNIVER_BASE}/@univerjs/preset-sheets-note/lib/index.css`,
-            cssTable:          `${UNIVER_BASE}/@univerjs/preset-sheets-table/lib/index.css`,
-            cssCrosshair:      `${UNIVER_BASE}/@univerjs/sheets-crosshair-highlight/lib/index.css`,
-        };
-        // Docs-only assets: just preset-docs-core (no feature presets yet,
-        // upstream Univer's docs feature ecosystem is still thinner than
-        // sheets'). Loaded lazily on first Documents-mode entry.
-        const UNIVER_URLS_DOCS = {
-            core:       `${UNIVER_BASE}/@univerjs/preset-docs-core/lib/umd/index.js`,
-            coreLocale: `${UNIVER_BASE}/@univerjs/preset-docs-core/lib/umd/locales/en-US.js`,
-            cssCore:    `${UNIVER_BASE}/@univerjs/preset-docs-core/lib/index.css`,
-        };
-        // Back-compat alias — existing code (Page Setup, XLSX import, etc.)
-        // still references UNIVER_URLS.X for the sheets-flavored URLs.
-        // Keeping the name avoids touching every reference site.
-        const UNIVER_URLS = UNIVER_URLS_SHEETS;
+        // Univer (https://univer.ai) + all 11 sheet presets + the docs
+        // preset + crosshair-highlight + react/rxjs are bundled into a
+        // single dist/univer.js + dist/univer.css by esbuild (see
+        // build.mjs + src/bundle-entry.js). Cuts warm-cache mount time
+        // from ~14.7s to under 1s by collapsing 30+ separate CSS/JS
+        // parse passes into 2 — browser CSS parse was the dominant cost
+        // (~1.3-1.9s per file × 11 files), not network.
+        //
+        // To rebuild after bumping a Univer version in package.json:
+        //   npm install && npm run build
+        // dist/ is committed so prod (Dokploy + nginx static serve)
+        // doesn't need a Node toolchain in the Docker build.
+        const UNIVER_BUNDLE_JS = 'dist/univer.js';
+        const UNIVER_BUNDLE_CSS = 'dist/univer.css';
         // Column keys that should be forced to text type in XLSX export.
         // Empty in the standalone build — original iSurvey-specific keys
         // were dropped along with the form/fetch pipeline.
@@ -701,15 +649,8 @@
             // mounted. Set by enterMode + cleared by goHome. File-ops,
             // open/save/print all branch on this.
             mode: null,
-            loaded: false,           // legacy combined flag (true once any preset stack is loaded)
-            loadingPromise: null,    // in-flight load promise (single-flight, legacy combined)
-            // Per-mode CDN-load state — keeps Sheets and Docs presets cached
-            // separately so flipping Sheets → Home → Docs only fetches docs
-            // preset on the FIRST Docs entry.
-            loadedSheets: false,
-            loadingSheetsPromise: null,
-            loadedDocs: false,
-            loadingDocsPromise: null,
+            loaded: false,           // bundle.js + bundle.css fetched
+            loadingPromise: null,    // in-flight bundle load promise (single-flight)
             mounted: false,          // Univer workbook/document created
             dirty: false,            // edits since last save
             currentData: null,       // last known workbook snapshot (IWorkbookData) or IDocumentData
@@ -2068,121 +2009,37 @@
             });
         }).catch(e => console.warn('print/preview Ctrl+P interceptor load failed:', e));
 
-        // Load the base UMD bundle (react/reactDom/rxjs + the
-        // @univerjs/presets shim that defines UniverPresets + UniverCore).
-        // Idempotent — safe to await once per enterMode. Both Sheets and
-        // Docs flows share these globals so we never load them twice.
-        let _baseLoaded = false;
-        let _baseLoadingPromise = null;
-        function loadUniverBaseAssets() {
-            if (_baseLoaded) return Promise.resolve();
-            if (_baseLoadingPromise) return _baseLoadingPromise;
-            _baseLoadingPromise = (async () => {
-                await _loadUniverScript(UNIVER_URLS_BASE.react);
-                await _loadUniverScript(UNIVER_URLS_BASE.reactDom);
-                await _loadUniverScript(UNIVER_URLS_BASE.rxjs);
-                await _loadUniverScript(UNIVER_URLS_BASE.presets);
+        // Load the single bundled Univer asset pack (sheets + docs +
+        // all feature presets + crosshair + react/rxjs + all CSS).
+        // Idempotent — repeat calls (launcher preload, Home-button
+        // revisit, mode switch) return the cached promise. Mode arg
+        // exists for back-compat with the old sheets/docs split.
+        function loadUniverAssets(mode) {
+            if (sheetState.loaded) return Promise.resolve();
+            if (sheetState.loadingPromise) return sheetState.loadingPromise;
+            sheetState.loadingPromise = (async () => {
+                // CSS in parallel — non-blocking for layout. JS bundle
+                // assigns the UMD-style globals the loader code below
+                // depends on (UniverPresets, UniverCore, the per-preset
+                // namespaces + their EnUS locale objects, etc.).
+                _loadUniverCss(UNIVER_BUNDLE_CSS);
+                await _loadUniverScript(UNIVER_BUNDLE_JS);
                 if (typeof UniverPresets === 'undefined'
                     || typeof UniverCore === 'undefined') {
-                    throw new Error('Univer base globals not found after script load');
-                }
-                _baseLoaded = true;
-            })();
-            return _baseLoadingPromise.catch(err => {
-                _baseLoadingPromise = null;
-                throw err;
-            });
-        }
-
-        // Load the sheets-specific preset stack (core + feature presets +
-        // crosshair plugin + their CSS). Cached behind sheetState.loadedSheets
-        // so subsequent Sheets entries are instant.
-        function loadUniverSheetsAssets() {
-            if (sheetState.loadedSheets) return Promise.resolve();
-            if (sheetState.loadingSheetsPromise) return sheetState.loadingSheetsPromise;
-            sheetState.loadingSheetsPromise = (async () => {
-                await loadUniverBaseAssets();
-                // CSS in parallel — non-blocking for layout
-                [UNIVER_URLS_SHEETS.cssCore, UNIVER_URLS_SHEETS.cssFilter, UNIVER_URLS_SHEETS.cssSort,
-                 UNIVER_URLS_SHEETS.cssFindReplace, UNIVER_URLS_SHEETS.cssCf,
-                 UNIVER_URLS_SHEETS.cssDataValidation, UNIVER_URLS_SHEETS.cssDrawing,
-                 UNIVER_URLS_SHEETS.cssHyperLink,
-                 UNIVER_URLS_SHEETS.cssNote, UNIVER_URLS_SHEETS.cssTable,
-                 UNIVER_URLS_SHEETS.cssCrosshair].forEach(_loadUniverCss);
-
-                // Core sheet preset + its locale
-                await _loadUniverScript(UNIVER_URLS_SHEETS.core);
-                await _loadUniverScript(UNIVER_URLS_SHEETS.coreLocale);
-                // Optional feature presets — load best-effort; if any fail to
-                // load we still proceed with whatever's available. The 2nd
-                // tuple entry is the locale URL; `null` means the package
-                // has no locale file (true for the crosshair-highlight
-                // plugin — its labels come from base sheets-ui).
-                const optional = [
-                    [UNIVER_URLS_SHEETS.filter,         UNIVER_URLS_SHEETS.filterLocale],
-                    [UNIVER_URLS_SHEETS.sort,           UNIVER_URLS_SHEETS.sortLocale],
-                    [UNIVER_URLS_SHEETS.findReplace,    UNIVER_URLS_SHEETS.findReplaceLocale],
-                    [UNIVER_URLS_SHEETS.cf,             UNIVER_URLS_SHEETS.cfLocale],
-                    [UNIVER_URLS_SHEETS.dataValidation, UNIVER_URLS_SHEETS.dataValidationLocale],
-                    [UNIVER_URLS_SHEETS.drawing,        UNIVER_URLS_SHEETS.drawingLocale],
-                    [UNIVER_URLS_SHEETS.hyperLink,      UNIVER_URLS_SHEETS.hyperLinkLocale],
-                    [UNIVER_URLS_SHEETS.note,           UNIVER_URLS_SHEETS.noteLocale],
-                    [UNIVER_URLS_SHEETS.table,          UNIVER_URLS_SHEETS.tableLocale],
-                    [UNIVER_URLS_SHEETS.crosshair,      null],
-                ];
-                for (const [js, loc] of optional) {
-                    try {
-                        await _loadUniverScript(js);
-                        if (loc) await _loadUniverScript(loc);
-                    } catch (e) {
-                        console.warn('Optional Univer preset failed to load:', js, e);
-                    }
+                    throw new Error('Univer base globals missing after bundle load');
                 }
                 if (typeof UniverPresetSheetsCore === 'undefined') {
-                    throw new Error('UniverPresetSheetsCore global not found after script load');
+                    throw new Error('UniverPresetSheetsCore missing after bundle load');
                 }
-                sheetState.loadedSheets = true;
-                // legacy combined flag — kept true once any stack is loaded
-                sheetState.loaded = true;
-            })();
-            return sheetState.loadingSheetsPromise.catch(err => {
-                sheetState.loadingSheetsPromise = null;
-                throw err;
-            });
-        }
-
-        // Load the docs-specific preset stack (preset-docs-core + its locale +
-        // its CSS). Much smaller surface than sheets. Cached behind
-        // sheetState.loadedDocs.
-        function loadUniverDocsAssets() {
-            if (sheetState.loadedDocs) return Promise.resolve();
-            if (sheetState.loadingDocsPromise) return sheetState.loadingDocsPromise;
-            sheetState.loadingDocsPromise = (async () => {
-                await loadUniverBaseAssets();
-                _loadUniverCss(UNIVER_URLS_DOCS.cssCore);
-                await _loadUniverScript(UNIVER_URLS_DOCS.core);
-                await _loadUniverScript(UNIVER_URLS_DOCS.coreLocale);
                 if (typeof UniverPresetDocsCore === 'undefined') {
-                    throw new Error('UniverPresetDocsCore global not found after script load');
+                    throw new Error('UniverPresetDocsCore missing after bundle load');
                 }
-                sheetState.loadedDocs = true;
                 sheetState.loaded = true;
             })();
-            return sheetState.loadingDocsPromise.catch(err => {
-                sheetState.loadingDocsPromise = null;
+            return sheetState.loadingPromise.catch(err => {
+                sheetState.loadingPromise = null;
                 throw err;
             });
-        }
-
-        // Mode-aware asset loader. Defaults to whatever sheetState.mode is
-        // set to; explicit `mode` argument lets enterMode preload before
-        // updating sheetState. Sheets is the back-compat default so
-        // existing callers (newBlankWorkbook, openSheetFile, etc.) that
-        // pass no arg still work in sheets mode.
-        function loadUniverAssets(mode) {
-            const m = mode || sheetState.mode || 'sheets';
-            if (m === 'docs') return loadUniverDocsAssets();
-            return loadUniverSheetsAssets();
         }
 
         // Cell value type tags used by Univer's IWorkbookData.cellData:
