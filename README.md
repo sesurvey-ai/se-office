@@ -1,21 +1,36 @@
 # Deploy บน Dokploy (VPS Hostinger)
 
-โปรเจกต์นี้เป็น **static HTML** (1 ไฟล์ HTML + 2 PNG) — รันบน nginx alpine
-ก็พอ ไม่ต้องการ database / runtime / build step ใด ๆ
+โปรเจกต์นี้เป็น **static HTML + pre-built bundle** — รันบน nginx alpine
+ก็พอ ไม่ต้องการ database / runtime ใด ๆ ฝั่ง server (Univer + presets
+ทั้งหมดถูก bundle ไว้ใน `dist/` แล้วผ่าน esbuild)
 
 ## ไฟล์ที่จะถูก deploy
 
 ```
-univer-standalone/
-├── Dockerfile         ← nginx:1.27-alpine + COPY 3 ไฟล์ + health check
-├── nginx.conf         ← gzip, cache headers, security
-├── .dockerignore      ← exclude README/dotfiles
+se-office/
+├── Dockerfile         ← nginx:1.27-alpine + COPY ไฟล์ static
+├── nginx.conf         ← gzip, cache headers, SPA fallback
 ├── index.html         ← standalone app (~250 KB)
 ├── Sheets.png         ← icon SE Sheets (~8 KB)
-└── Doc.png            ← icon SE Doc (~10 KB)
+├── Doc.png            ← icon SE Doc (~10 KB)
+└── dist/              ← Univer bundle (built locally, committed to git)
+    ├── univer.js      ← ~11 MB (~3 MB gzip — Univer + 11 sheet presets + docs + react + rxjs)
+    └── univer.css     ← ~85 KB
 ```
 
-Image ที่ build ออกมาประมาณ **~50 MB** (nginx alpine base ~40 MB + assets)
+Image ที่ build ออกมาประมาณ **~55 MB** (nginx alpine base ~40 MB + assets)
+
+## Build (ก่อน push)
+
+`dist/` ถูก commit ขึ้น git ดังนั้น Dockerfile ไม่ต้องใช้ Node toolchain
+แต่ developer ที่อัปเดต Univer version ต้อง rebuild local ก่อน push:
+
+```bash
+npm install            # ครั้งแรกเท่านั้น
+npm run build          # → regenerates dist/univer.js + dist/univer.css
+git add dist/ package.json package-lock.json
+git commit -m "Rebuild Univer bundle"
+```
 
 ---
 
@@ -24,8 +39,8 @@ Image ที่ build ออกมาประมาณ **~50 MB** (nginx alpine
 ### 1. Push ขึ้น Git repo
 
 ```bash
-cd c:\Users\i9\Desktop\se-office\univer-standalone
-git init
+cd c:\Users\i9\Desktop\se-office
+npm install && npm run build           # rebuild dist/ (skip ถ้าใช้ของที่ commit ไว้)
 git add .
 git commit -m "Initial SE OFFICE standalone"
 git branch -M main
@@ -44,9 +59,11 @@ git push -u origin main
    - **Source Type**: Git
    - **Repository URL**: `https://github.com/<user>/<repo>.git`
    - **Branch**: `main`
-   - **Build Path**: `/` (หรือ `/univer-standalone` ถ้า push ทั้งโปรเจกต์รวม)
+   - **Build Path**: `/`
    - **Build Type**: **Dockerfile**
    - **Dockerfile Path**: `./Dockerfile`
+   - หมายเหตุ: `dist/` ต้อง commit ขึ้น git แล้ว — Dokploy build จะ
+     COPY ไฟล์ใน dist/ เข้า image โดยตรง ไม่มี Node อยู่ใน build stage
 5. **Environment** tab — ไม่ต้องตั้งค่า env var (static site)
 6. **Domains** tab → **Add Domain**
    - **Host**: `se-office.example.com` (subdomain ที่จะใช้)
@@ -74,7 +91,10 @@ git push -u origin main
 ถ้าไม่อยาก push code ขึ้น Git สาธารณะ:
 
 ```bash
-cd c:\Users\i9\Desktop\se-office\univer-standalone
+cd c:\Users\i9\Desktop\se-office
+
+# (ครั้งแรก / หลังอัปเดต Univer version)
+npm install && npm run build
 
 # Build image
 docker build -t se-office:latest .
@@ -118,7 +138,10 @@ push ไป + ตั้ง port 80 → Deploy
 2. **Browser**: เปิด domain → ต้องเห็นหน้า launcher (SE OFFICE + SE Sheets icon)
 3. **DevTools → Network**:
    - `index.html` มาจาก server ของเรา (~50 KB gzip)
-   - Univer / SheetJS / jsPDF / fonts โหลดจาก unpkg + jsdelivr (external CDN)
+   - `dist/univer.js` + `dist/univer.css` มาจาก server เดียวกัน
+     (same-origin, ~3 MB gzip รวม) — โหลดครั้งเดียวต่อ session
+   - SheetJS / jsPDF / Sarabun font / PDF.js ยังโหลดจาก unpkg + jsdelivr
+     (ยังไม่ bundle — โหลด lazy เมื่อกด Save XLSX / Print / Open .xlsx)
 4. **Console**: ไม่ควรมี error สีแดง (ยกเว้น CORS warning ของ CDN บางตัวที่
    ไม่ส่ง `Access-Control-Allow-Origin` — ส่วนใหญ่ไม่กระทบฟังก์ชัน)
 
@@ -126,16 +149,19 @@ push ไป + ตั้ง port 80 → Deploy
 
 ## หมายเหตุสำคัญ
 
-- **CDN dependency**: app นี้พึ่ง unpkg.com + cdn.jsdelivr.net สำหรับ Univer +
-  SheetJS + jsPDF + Sarabun font + PDF.js ถ้า CDN ล่ม / ถูกบล็อก app จะโหลด
-  ไม่ขึ้น ถ้าต้องการ self-host ทุกอย่าง บอกได้ จะปรับ Dockerfile ให้
-  download assets ลง image ตอน build
+- **Univer self-hosted**: Univer + presets + react/rxjs ถูก bundle ใน
+  `dist/` และเสิร์ฟ same-origin แล้ว — CDN ล่มไม่กระทบหน้า launcher /
+  Sheets / Docs warm path
+- **CDN dependency (ส่วนรอง)**: SheetJS + jsPDF + Sarabun font + PDF.js +
+  se-univer-shared modules ยังโหลดจาก unpkg.com + jsdelivr.net แบบ lazy
+  ถ้า CDN ล่ม → กด Save XLSX / Print / Open .xlsx ไม่ได้ แต่ Save JSON /
+  พิมพ์ใน sheet ปกติยังใช้ได้
 - **HTTPS จำเป็น**: File System Access API (Save As / Open file picker
   ของ browser) ใช้ได้เฉพาะบน HTTPS หรือ localhost — Dokploy + Let's Encrypt
   ก็จะแก้ปัญหานี้ให้อัตโนมัติ
-- **Hash routing**: `#/sheets` / `#/docs` ทำงาน client-side ล้วน — server
-  เห็นแค่ path `/` ทุก request ดังนั้น nginx config ไม่ต้องการ SPA fallback
-  พิเศษ (มีอยู่แล้วเผื่ออนาคต)
+- **History API routing**: `/sheets` / `/docs` ใช้ pushState — server
+  ต้องมี SPA fallback (`try_files $uri $uri/ /index.html`) ไม่งั้น hard
+  refresh จะ 404 (nginx.conf จัดการแล้ว)
 - **No persistence**: app เก็บ workbook ไว้ที่เครื่อง user เท่านั้น (Save →
   download ไฟล์ / File System Access API) ไม่มีฝั่ง server ต้องห่วง backup
 
@@ -148,7 +174,8 @@ push ไป + ตั้ง port 80 → Deploy
 | Build fail "COPY index.html: file not found" | ไฟล์ไม่อยู่ใน build context | ตรวจว่า Build Path ใน Dokploy ชี้ไปที่โฟลเดอร์ที่มี index.html |
 | 502 Bad Gateway | Container ยังไม่ healthy / port ผิด | ตรวจว่า Container Port = 80, รอ 30s ให้ health check ผ่าน |
 | HTTPS cert ไม่ออก | DNS ยังไม่ propagate / domain ชี้ผิด IP | `dig se-office.example.com` ตรวจว่าได้ IP ของ VPS, รอ DNS, ลอง redeploy |
-| หน้าโหลดแต่ Univer ไม่ขึ้น | unpkg / jsdelivr ถูก firewall ของ VPS บล็อก | SSH เข้า VPS แล้ว `curl -I https://unpkg.com/@univerjs/presets/lib/umd/index.js` ตรวจ network egress |
+| หน้าโหลดแต่ Univer ไม่ขึ้น | `dist/` ไม่ได้ถูก COPY เข้า image / build ลืม `npm run build` | เช็ค `https://<domain>/dist/univer.js` ใน DevTools — ถ้า 404 = Dockerfile ไม่ได้ COPY ใส่ image, ถ้า 200 แต่เก่า = ลืม rebuild ก่อน push |
+| Save XLSX / Print / Open .xlsx ไม่ทำงาน | unpkg / jsdelivr ถูก firewall บล็อก (SheetJS / jsPDF / se-univer-shared ยังโหลดจาก CDN) | SSH เข้า VPS แล้ว `curl -I https://unpkg.com/xlsx-js-style/dist/xlsx.bundle.js` ตรวจ network egress |
 | File picker Save As ไม่เปิด | ใช้ HTTP ไม่ใช่ HTTPS | ตั้ง HTTPS ใน Dokploy domain settings |
 
 ---
@@ -158,6 +185,8 @@ push ไป + ตั้ง port 80 → Deploy
 หลังแก้ไขไฟล์:
 
 ```bash
+# ถ้าแตะ package.json (อัปเดต Univer version) — ต้อง rebuild ก่อน
+npm run build
 git add . && git commit -m "Update" && git push
 ```
 

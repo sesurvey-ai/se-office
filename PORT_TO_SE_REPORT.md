@@ -13,6 +13,7 @@
 | **M1** | Print เงียบเมื่อ CDN ล่ม (unhandled rejection) | 🟡 Major | ผู้ใช้กด Print แล้วไม่มีอะไรเกิด |
 | **M2** | `saving` flag ค้าง `true` ถ้า loader throw (regression จาก C1) | 🟡 Major | Save ใช้ไม่ได้จนรีเฟรช |
 | **M2-bonus** | `openSheetFile` unhandled rejection | 🟢 Minor | Open เงียบเมื่อ CDN ล่ม |
+| **B1** | Univer bundle (esbuild) — โหลด 2 ไฟล์ same-origin แทน 30+ จาก unpkg | 🟢 Perf | Warm-cache mount 14.7s → <1s |
 
 ---
 
@@ -398,6 +399,104 @@ async function openSheetFile() {
 2. กด Save → alert "บันทึกไม่สำเร็จ"
 3. Console: `sheetState.saving` → ต้องได้ `false` (ไม่ค้าง)
 4. Unblock → Save อีกครั้งทำงานปกติ
+
+---
+
+---
+
+## B1 — Univer bundle (เปลี่ยนจาก CDN UMD → esbuild bundle)
+
+### ทำไม
+
+โหลด Univer + 11 sheet presets + docs preset + react + rxjs + ทุก
+CSS ผ่าน `<script>` / `<link>` แยกๆ จาก unpkg = 30+ ไฟล์, browser CSS
+parse ใช้เวลา ~1.3-1.9s ต่อไฟล์ → warm-cache mount ~14.7s
+
+รวมเป็น `dist/univer.js` + `dist/univer.css` ผ่าน esbuild → parse 2 ครั้ง
+→ <1s
+
+### ข้อแตกต่างกับ se-office
+
+se-office เป็น nginx-served static — COPY `dist/` เข้า image ตรง ๆ
+**se-report เป็น Flask-served** — `dist/` ต้องวางใน `static/` ของ Flask
+หรือ mount path ใหม่ผ่าน `@app.route` / `send_from_directory`
+
+### ไฟล์ที่ต้องเพิ่มใน se-report
+
+```
+se-report/
+├── package.json           ← copy จาก se-office (เปลี่ยน "name" → "se-report")
+├── build.mjs              ← copy ทั้งไฟล์
+├── src/
+│   └── bundle-entry.js    ← copy ทั้งไฟล์
+└── static/dist/           ← output ของ npm run build (committed to git)
+    ├── univer.js
+    └── univer.css
+```
+
+ปรับ `build.mjs` ถ้าจะใช้ output path อื่น:
+
+```js
+const OUTDIR = resolve('static/dist');   // ← เปลี่ยนจาก 'dist'
+```
+
+### แก้ template (index.html / Jinja)
+
+ลบ block ที่ประกาศ `UNIVER_URLS_BASE` / `UNIVER_URLS_SHEETS` /
+`UNIVER_URLS_DOCS` (30+ บรรทัด) และฟังก์ชัน `loadUniverBaseAssets()` /
+`loadUniverSheetsAssets()` / `loadUniverDocsAssets()` ทั้งหมด
+
+แทนด้วย:
+
+```js
+const UNIVER_BUNDLE_JS = '{{ url_for("static", filename="dist/univer.js") }}';
+const UNIVER_BUNDLE_CSS = '{{ url_for("static", filename="dist/univer.css") }}';
+
+function loadUniverAssets(mode) {
+    if (sheetState.loaded) return Promise.resolve();
+    if (sheetState.loadingPromise) return sheetState.loadingPromise;
+    sheetState.loadingPromise = (async () => {
+        _loadUniverCss(UNIVER_BUNDLE_CSS);
+        await _loadUniverScript(UNIVER_BUNDLE_JS);
+        if (typeof UniverPresets === 'undefined'
+            || typeof UniverCore === 'undefined') {
+            throw new Error('Univer base globals missing after bundle load');
+        }
+        if (typeof UniverPresetSheetsCore === 'undefined') {
+            throw new Error('UniverPresetSheetsCore missing after bundle load');
+        }
+        if (typeof UniverPresetDocsCore === 'undefined') {
+            throw new Error('UniverPresetDocsCore missing after bundle load');
+        }
+        sheetState.loaded = true;
+    })();
+    return sheetState.loadingPromise.catch(err => {
+        sheetState.loadingPromise = null;
+        throw err;
+    });
+}
+```
+
+(ถ้า se-report ใช้ template ที่ไม่ใช่ Jinja หรือ path อื่น แค่ปรับ
+ค่าของ `UNIVER_BUNDLE_JS` / `UNIVER_BUNDLE_CSS` ให้ตรง URL จริง)
+
+ลบ field `loadedSheets / loadingSheetsPromise / loadedDocs /
+loadingDocsPromise` ใน `sheetState` ด้วย — ใช้แค่ `loaded` /
+`loadingPromise` เดียว
+
+### ทดสอบ
+
+1. `npm install && npm run build` → ได้ `static/dist/univer.js` + `.css`
+2. รัน Flask → เปิดหน้า launcher
+3. DevTools → Network: เห็นแค่ 2 request ของ Univer (univer.js + univer.css)
+   ไม่ใช่ 30+ request ไป unpkg
+4. กด SE Sheets → mount ภายใน 1-2 วินาที (warm cache)
+
+### หมายเหตุ
+
+- ใช้ Univer version เดียวกับ se-office (`0.23.0`) เพื่อให้ behavior ตรงกัน
+- SheetJS / jsPDF / Sarabun font / PDF.js / se-univer-shared **ยังโหลดจาก
+  CDN** เหมือนเดิม — ไม่ต้อง bundle (lazy-loaded, ไม่ใช่ critical path)
 
 ---
 
