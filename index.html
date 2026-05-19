@@ -2446,15 +2446,35 @@
             // for every mutation (type === 2 in the CommandType enum). We
             // suppress dirty marking for the first 500ms because the initial
             // createWorkbook itself dispatches commands.
+            //
+            // The 500ms window alone isn't enough — Univer keeps firing
+            // internal mutations long after mount finishes:
+            //   - doc.mutation.rich-text-editing  → in sheets mode this is
+            //     the cell-editor sub-doc init (each cell has an embedded
+            //     doc editor; it (re)initializes when the canvas finishes
+            //     async rendering, ~1s post-mount). In docs mode it IS the
+            //     user typing in the doc body, so we only filter it when
+            //     not in docs mode.
+            //   - formula.mutation.set-formula-calculation-*  → formula
+            //     engine kickoff / recalc notifications, fire in a burst
+            //     around T+1s once fonts/render settle. Sheets-only noise.
+            // Without an ID filter, just opening Univer and immediately
+            // clicking Open triggers the "unsaved changes" confirm. Real
+            // cell edits commit through sheet.mutation.set-range-values
+            // (sheets) or genuine doc.mutation.* keystrokes (docs) which
+            // still flip dirty, so this filter only drops init noise.
             const mountedAt = Date.now();
             try {
                 if (typeof univerAPI.onCommandExecuted === 'function') {
                     univerAPI.onCommandExecuted((cmd) => {
                         if (Date.now() - mountedAt < 500) return;
                         // type === 2 is "Mutation" in Univer's CommandType enum
-                        if (cmd && (cmd.type === 2 || cmd.type === 'mutation')) {
-                            if (!sheetState.dirty) setSheetDirty(true);
-                        }
+                        if (!cmd || (cmd.type !== 2 && cmd.type !== 'mutation')) return;
+                        if (typeof cmd.id !== 'string') return;
+                        if (cmd.id.startsWith('formula.mutation.')) return;
+                        if (sheetState.mode !== 'docs'
+                            && cmd.id.startsWith('doc.mutation.')) return;
+                        if (!sheetState.dirty) setSheetDirty(true);
                     });
                 }
             } catch (e) {
