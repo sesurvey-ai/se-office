@@ -2225,16 +2225,17 @@
         // race window is closed. Capture-phase listener beats Univer's
         // own keydown handlers; preventDefault stops the native dialog.
         //
-        // Sheets-only — docs mode + launcher fall through to native
-        // (no Page Setup pipeline for docs; harmless since canvas is
-        // not the focus there).
+        // ALWAYS preventDefault — even in docs/launcher mode where we
+        // don't have a Page Setup pipeline. The native @media print
+        // would render the canvas-only Univer UI as a blank page,
+        // which is worse UX than no-op. printActiveView surfaces a
+        // mode-appropriate alert ("โหมดเอกสารยังไม่รองรับ" / "ยังไม่มี
+        // workbook ให้พิมพ์") for the non-sheets paths.
         document.addEventListener('keydown', function (e) {
             var isPrintKey = (e.ctrlKey || e.metaKey)
                 && !e.altKey && !e.shiftKey
                 && (e.key === 'p' || e.key === 'P');
             if (!isPrintKey) return;
-            if (typeof sheetState === 'undefined'
-                || sheetState.mode !== 'sheets') return;
             e.preventDefault();
             e.stopPropagation();
             if (typeof printActiveView === 'function') printActiveView();
