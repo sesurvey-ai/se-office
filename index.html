@@ -1496,6 +1496,48 @@
                         }
                     }
                 }
+
+                // Univer's snapshot stores RAW values: dates are Excel
+                // serial numbers (46159 = 17/05/2569 BE), currencies are
+                // plain floats (749 instead of "749.00"), etc. The user
+                // sees the FORMATTED display string in the sheet via the
+                // cell's number format pattern. Without this lookup the
+                // PDF prints the raw serial — date column shows "46159"
+                // and money column drops the .00 decimals — diverging
+                // from what's on screen.
+                //
+                // Bulk-fetch via the facade in one call so we don't pay
+                // per-cell dispatch overhead. Scope to the print bounding
+                // box (minR..maxR × minC..maxC) we already computed
+                // above. Fallback: if the facade is unavailable or the
+                // lookup throws, buildRowForChunk falls back to cell.v.
+                let displayGrid = null;
+                try {
+                    if (sheetState.univerAPI) {
+                        const fWb = sheetState.univerAPI.getActiveWorkbook();
+                        let fSh = null;
+                        if (fWb) {
+                            if (typeof fWb.getSheetBySheetId === 'function') {
+                                fSh = fWb.getSheetBySheetId(sheetId);
+                            }
+                            if (!fSh && typeof fWb.getActiveSheet === 'function') {
+                                fSh = fWb.getActiveSheet();
+                            }
+                        }
+                        if (fSh && typeof fSh.getRange === 'function'
+                                && maxR >= minR && maxC >= minC) {
+                            const range = fSh.getRange(minR, minC,
+                                maxR - minR + 1, maxC - minC + 1);
+                            if (range && typeof range.getDisplayValues === 'function') {
+                                displayGrid = range.getDisplayValues();
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.warn(
+                        'getDisplayValues failed (PDF will use raw values):', e);
+                }
+
                 // Per-chunk row builder: walks the columns in `chunkCols`
                 // (a subset of [0..maxC]), skips merge-covered cells, and
                 // emits anchor cells with adjusted colSpan that doesn't
@@ -1514,7 +1556,19 @@
                         if (merge && !merge.isAnchor) continue;
                         const cell = (cellData[r] && cellData[r][c]) || null;
                         const v = cell && cell.v;
-                        const text = (v === null || v === undefined) ? '' : String(v);
+                        // Prefer the facade's display string ("17/05/2569",
+                        // "749.00") over raw cell.v ("46159", "749") so the
+                        // PDF text matches what the user sees in Univer.
+                        // Empty grid cells (no formatted text) fall back to
+                        // raw v → String(v).
+                        let text;
+                        const dispRow = displayGrid && displayGrid[r - minR];
+                        const disp = dispRow ? dispRow[c - minC] : undefined;
+                        if (disp !== undefined && disp !== null && disp !== '') {
+                            text = String(disp);
+                        } else {
+                            text = (v === null || v === undefined) ? '' : String(v);
+                        }
                         if (merge && merge.isAnchor
                             && (merge.colSpan > 1 || merge.rowSpan > 1)) {
                             // Clip colSpan to the cells that still live
