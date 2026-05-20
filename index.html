@@ -1134,6 +1134,93 @@
         // sets up Ctrl+P/Cmd+P routing inside its own modal so we don't
         // re-bind keyboard shortcuts here.
         let _pageSetupInstance = null;
+        // Convert a 0-based column index → A1 letter (0→A, 25→Z, 26→AA…).
+        function _colIdxToA1Letter(idx) {
+            var n = idx, s = '';
+            while (n >= 0) {
+                s = String.fromCharCode(65 + (n % 26)) + s;
+                n = Math.floor(n / 26) - 1;
+            }
+            return s;
+        }
+
+        // Read Univer's current active range and return it as an A1-style
+        // range string ("A1:G100"). Empty string if nothing selected or
+        // the facade isn't available. Used by the Page Setup "พิมพ์ →
+        // เซลล์ที่เลือก" dropdown to populate the printArea text input
+        // — the shared module only consumes the text input, the scope
+        // dropdown is sugar that we wire here.
+        function _getUniverActiveRangeA1() {
+            if (!sheetState.univerAPI) return '';
+            try {
+                var wb = sheetState.univerAPI.getActiveWorkbook();
+                var sh = wb && wb.getActiveSheet && wb.getActiveSheet();
+                if (!sh) return '';
+                var sel = typeof sh.getActiveRange === 'function'
+                    ? sh.getActiveRange() : null;
+                if (!sel) return '';
+                var r = null;
+                if (typeof sel.getRange === 'function') {
+                    r = sel.getRange();
+                } else if (typeof sel.getRow === 'function'
+                        && typeof sel.getColumn === 'function') {
+                    r = {
+                        startRow: sel.getRow(),
+                        startColumn: sel.getColumn(),
+                        endRow: sel.getRow()
+                            + (typeof sel.getNumRows === 'function'
+                                ? sel.getNumRows() - 1 : 0),
+                        endColumn: sel.getColumn()
+                            + (typeof sel.getNumColumns === 'function'
+                                ? sel.getNumColumns() - 1 : 0),
+                    };
+                }
+                if (!r || typeof r.startRow !== 'number') return '';
+                var start = _colIdxToA1Letter(r.startColumn) + (r.startRow + 1);
+                var end = _colIdxToA1Letter(r.endColumn) + (r.endRow + 1);
+                return start === end ? start : start + ':' + end;
+            } catch (e) {
+                console.warn('_getUniverActiveRangeA1 failed:', e);
+                return '';
+            }
+        }
+
+        // Wires the dead "psPrintScope" dropdown in the Page Setup
+        // modal — shared module's _readForm only consumes the text
+        // input psPrintArea, so picking "เซลล์ที่เลือก" used to do
+        // nothing. We snapshot the Univer selection once on dropdown
+        // change and write it into psPrintArea. Idempotent — guarded
+        // with a flag because we wire on every open(), but the form
+        // DOM persists once init creates it.
+        var _psScopeWired = false;
+        function _wirePrintScopeDropdown() {
+            if (_psScopeWired) return;
+            var overlay = document.querySelector('.psh-modal-overlay');
+            if (!overlay) return;
+            var scope = overlay.querySelector('[data-psh="psPrintScope"]');
+            var area = overlay.querySelector('[data-psh="psPrintArea"]');
+            if (!scope || !area) return;
+            scope.addEventListener('change', function () {
+                if (scope.value === 'selection') {
+                    var range = _getUniverActiveRangeA1();
+                    if (!range) {
+                        alert('ยังไม่ได้เลือกช่วงเซลล์ใน sheet — '
+                            + 'คลิกเลือกช่วงก่อนเปิด Print');
+                        scope.value = 'current';
+                        return;
+                    }
+                    area.value = range;
+                } else {
+                    area.value = '';
+                }
+                // Fire input + change so the shared module's preview
+                // rebuild listener picks up the new printArea value.
+                area.dispatchEvent(new Event('input', { bubbles: true }));
+                area.dispatchEvent(new Event('change', { bubbles: true }));
+            });
+            _psScopeWired = true;
+        }
+
         async function _ensurePageSetup() {
             if (_pageSetupInstance) return _pageSetupInstance;
             await loadPageSetupAssets();
@@ -1144,6 +1231,15 @@
                 // modal-close paint lands before the slow PDF render.
                 onSave: (state) => {
                     setTimeout(() => printSheetToPdf(state), 50);
+                },
+                // Reset button only reseeds the form by default — but
+                // doesn't clear localStorage, so closing + reopening
+                // the modal brings the user's custom values back and
+                // "reset" appears not to work. Wipe the saved state
+                // here so the reset persists across modal opens.
+                onReset: () => {
+                    try { localStorage.removeItem(PAGE_SETUP_KEY); }
+                    catch (e) { /* private mode etc — ignore */ }
                 },
                 preview: {
                     // Module debounces + caches; we just return a Blob.
@@ -1162,6 +1258,21 @@
         async function openPageSetupModal() {
             const ps = await _ensurePageSetup();
             ps.open();
+            // After open() seeds the form from saved state, (a) wire
+            // the print-scope dropdown if we haven't yet, (b) derive
+            // its visual value from printArea (non-empty = "selection",
+            // empty = "current") so the dropdown reflects the active
+            // setting on every open.
+            setTimeout(() => {
+                _wirePrintScopeDropdown();
+                const overlay = document.querySelector('.psh-modal-overlay');
+                if (!overlay) return;
+                const scope = overlay.querySelector('[data-psh="psPrintScope"]');
+                const area = overlay.querySelector('[data-psh="psPrintArea"]');
+                if (scope && area) {
+                    scope.value = area.value.trim() ? 'selection' : 'current';
+                }
+            }, 0);
         }
 
         function closePageSetupModal() {
@@ -1983,38 +2094,30 @@
         // doesn't dump a blank page for Sheet view (Univer renders to a
         // <canvas> that @media print can't scrape). Routes through
         // printActiveView so the keyboard shortcut and the toolbar
-        // button produce the same output, regardless of which view is
-        // active.
+        // button produce the same output.
         //
-        // Positioned AFTER the SeShared loader declarations above —
-        // calling loadPrintPreviewAssets() earlier hits a TDZ on the
-        // `const printPreviewState` it closes over and throws Uncaught,
-        // which would abort the rest of the script (including the
-        // launcher click bindings at the bottom).
+        // Inlined (not via SeShared.print.preview.interceptPrintShortcut)
+        // because that module is lazy-loaded from jsdelivr — during the
+        // ~hundreds of ms it takes to fetch, Ctrl+P would fall through
+        // to the native dialog and dump a blank page. This handler is
+        // installed synchronously at script-evaluation time so the
+        // race window is closed. Capture-phase listener beats Univer's
+        // own keydown handlers; preventDefault stops the native dialog.
         //
-        // The shared interceptor swallows Ctrl+P unconditionally; the
-        // mode check inside the handler decides whether to route to
-        // Page Setup or fall back to the native dialog. Lazy-load the
-        // module on first DOMContentLoaded — fire-and-forget; it's not
-        // a hard dependency and Ctrl+P is rare enough that a brief
-        // interval where it falls through to native is acceptable.
-        loadPrintPreviewAssets().then(() => {
-            SeShared.print.preview.interceptPrintShortcut(() => {
-                // Print is sheets-only. In docs mode (or on the launcher)
-                // let the native browser dialog handle Ctrl+P — there's
-                // no Page Setup pipeline for docs.
-                if (sheetState.mode !== 'sheets') {
-                    // Signal "did not handle" by re-firing the default —
-                    // but the shared module preventDefault'd already, so
-                    // we just no-op. Trade-off: in docs mode Ctrl+P is
-                    // silent. Acceptable since printing docs is unsupported
-                    // (alert in printActiveView would surface it on the
-                    // toolbar Print button anyway).
-                    return;
-                }
-                printActiveView();
-            });
-        }).catch(e => console.warn('print/preview Ctrl+P interceptor load failed:', e));
+        // Sheets-only — docs mode + launcher fall through to native
+        // (no Page Setup pipeline for docs; harmless since canvas is
+        // not the focus there).
+        document.addEventListener('keydown', function (e) {
+            var isPrintKey = (e.ctrlKey || e.metaKey)
+                && !e.altKey && !e.shiftKey
+                && (e.key === 'p' || e.key === 'P');
+            if (!isPrintKey) return;
+            if (typeof sheetState === 'undefined'
+                || sheetState.mode !== 'sheets') return;
+            e.preventDefault();
+            e.stopPropagation();
+            if (typeof printActiveView === 'function') printActiveView();
+        }, true);
 
         // Load the single bundled Univer asset pack (sheets + docs +
         // all feature presets + crosshair + react/rxjs + all CSS).
