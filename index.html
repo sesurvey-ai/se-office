@@ -1481,13 +1481,24 @@
                         // with single-Tj content streams. autoTable's
                         // output has the same vector ops as the data
                         // case, which PDF.js handles fine.
+                        //
+                        // Vertically center the row on the printable
+                        // area by offsetting startY to halfway between
+                        // top and bottom margins, minus a small slice
+                        // for the cell's own height. autoTable
+                        // halign:'center' already handles horizontal.
+                        const pageH = doc.internal.pageSize.getHeight();
+                        const printableMidY = (ps.marginTop
+                            + (pageH - ps.marginBottom)) / 2;
                         doc.autoTable({
-                            body: [['(ไม่มีข้อมูลในชีต)']],
+                            body: [['ไม่มีข้อมูลในชีต']],
+                            startY: Math.max(ps.marginTop,
+                                printableMidY - 5),
                             theme: 'plain',
                             styles: {
-                                font: 'THSarabun', fontSize: 11,
+                                font: 'THSarabun', fontSize: 14,
                                 halign: 'center', valign: 'middle',
-                                textColor: [120, 120, 120],
+                                textColor: [140, 140, 140],
                                 fillColor: false, lineWidth: 0,
                             },
                             margin: {
