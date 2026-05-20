@@ -1143,6 +1143,22 @@
             }
             return s;
         }
+        // Inverse: "A" / "Z" / "AA" → 0-based column index. Returns -1
+        // on bad input. Used by _parsePrintArea to parse user-entered
+        // ranges like "A1:G100". Was missing from se-office (existed in
+        // se-report only) — without it _parsePrintArea threw Reference
+        // Error every time, which silently broke the entire printArea /
+        // "พิมพ์เซลล์ที่เลือก" flow.
+        function _letterToColIdx(letter) {
+            if (!letter) return -1;
+            var s = String(letter).toUpperCase().replace(/[^A-Z]/g, '');
+            if (!s) return -1;
+            var n = 0;
+            for (var i = 0; i < s.length; i++) {
+                n = n * 26 + (s.charCodeAt(i) - 64);
+            }
+            return n - 1;
+        }
 
         // Read Univer's current active range and return it as an A1-style
         // range string ("A1:G100"). Empty string if nothing selected or
