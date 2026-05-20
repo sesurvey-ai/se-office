@@ -1456,7 +1456,47 @@
                     }
                 }
                 if (maxR < 0 || maxC < 0) {
-                    if (returnBlobOnly) return null;
+                    if (returnBlobOnly) {
+                        // Preview path — emit a single-page PDF with a
+                        // small "ว่างเปล่า" placeholder so the modal
+                        // renders something the user can see. A fully
+                        // empty jsPDF doc parses fine in PDF.js but
+                        // .render() hangs indefinitely (probably a
+                        // PDF.js quirk with no-content streams) — the
+                        // shared module then silently swallows the
+                        // timeout and the canvas stays at 0×0 (blank
+                        // preview pane with no page outline at all).
+                        // A single text node is enough to wake up the
+                        // renderer.
+                        const ps = psOverride || loadPageSetup();
+                        const doc = new jspdf.jsPDF({
+                            orientation: ps.orientation || 'portrait',
+                            unit: 'mm',
+                            format: ps.paperSize || 'a4',
+                        });
+                        // Use autoTable for the empty-state placeholder
+                        // (rather than doc.text alone) because PDF.js
+                        // render() hangs indefinitely on jsPDF docs that
+                        // only contain text streams — possibly a quirk
+                        // with single-Tj content streams. autoTable's
+                        // output has the same vector ops as the data
+                        // case, which PDF.js handles fine.
+                        doc.autoTable({
+                            body: [['(ไม่มีข้อมูลในชีต)']],
+                            theme: 'plain',
+                            styles: {
+                                font: 'THSarabun', fontSize: 11,
+                                halign: 'center', valign: 'middle',
+                                textColor: [120, 120, 120],
+                                fillColor: false, lineWidth: 0,
+                            },
+                            margin: {
+                                left: ps.marginLeft, right: ps.marginRight,
+                                top: ps.marginTop, bottom: ps.marginBottom,
+                            },
+                        });
+                        return doc.output('blob');
+                    }
                     alert('Sheet ว่างเปล่า');
                     return;
                 }
