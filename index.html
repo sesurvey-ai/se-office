@@ -2232,9 +2232,17 @@
         // mode-appropriate alert ("โหมดเอกสารยังไม่รองรับ" / "ยังไม่มี
         // workbook ให้พิมพ์") for the non-sheets paths.
         document.addEventListener('keydown', function (e) {
+            // Match by EITHER e.key OR e.code:
+            //   - e.key='p'/'P' covers Latin layouts
+            //   - e.code='KeyP' covers non-Latin layouts (Thai, Arabic,
+            //     Russian, ...) where pressing the physical P key sends
+            //     a different e.key value ('ย' on Thai Kedmanee, etc.)
+            // Without the code fallback, users with a Thai keyboard
+            // saw the native browser print dialog because the e.key
+            // check failed silently and preventDefault never ran.
             var isPrintKey = (e.ctrlKey || e.metaKey)
                 && !e.altKey && !e.shiftKey
-                && (e.key === 'p' || e.key === 'P');
+                && (e.key === 'p' || e.key === 'P' || e.code === 'KeyP');
             if (!isPrintKey) return;
             e.preventDefault();
             e.stopPropagation();
