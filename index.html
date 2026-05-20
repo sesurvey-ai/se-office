@@ -1005,6 +1005,57 @@
             return null;
         }
 
+        // Hide selected Univer toolbar items by command id. We keep the
+        // commands registered (so keyboard shortcuts / programmatic use
+        // still work) and just hide the button-shaped wrappers in the
+        // ribbon row. To extend / shrink the list, edit HIDDEN_UNIVER_COMMANDS.
+        //
+        // CSS-only wouldn't be enough — Univer rebuilds the ribbon DOM on
+        // tab switches and menu changes, dropping any inline style we left
+        // on the old nodes. A MutationObserver scoped to #univerHost reruns
+        // _applyUniverHiddenCommands whenever the subtree changes, and a
+        // data-se-hidden flag on each processed element avoids redoing the
+        // ancestor walk per mutation.
+        const HIDDEN_UNIVER_COMMANDS = new Set([
+            'base-ui.operation.toggle-shortcut-panel',
+            'sheet.menu.sheets-sort',
+            'sheet.menu.data-validation',
+            'sheet.command.numfmt.set.currency',
+            'sheet.command.set-range-font-increase',
+            'sheet.command.set-range-font-decrease',
+            'sheet.command.set-once-format-painter',
+            'sheet.command.clear-selection-all',
+            'sheet.operation.insert-hyper-link-toolbar',
+        ]);
+
+        function _applyUniverHiddenCommands(root) {
+            const scope = root || document.getElementById('univerHost') || document;
+            scope.querySelectorAll('[data-u-command]').forEach(el => {
+                const cmd = el.getAttribute('data-u-command');
+                if (!HIDDEN_UNIVER_COMMANDS.has(cmd)) return;
+                if (el.dataset.seHidden === '1') return;
+                let n = el;
+                while (n && n.parentElement && n !== document.body) {
+                    const c = (typeof n.className === 'string') ? n.className : '';
+                    if (/toolbar-item|ribbon-button|menu-item|toolbar-button/i.test(c)) break;
+                    n = n.parentElement;
+                }
+                if (n && n !== document.body && n.style) n.style.display = 'none';
+                else el.style.display = 'none';
+                el.dataset.seHidden = '1';
+            });
+        }
+
+        let _univerHideObserver = null;
+        function startUniverHideObserver() {
+            if (_univerHideObserver) return;
+            const host = document.getElementById('univerHost');
+            if (!host) return;
+            _univerHideObserver = new MutationObserver(() => _applyUniverHiddenCommands(host));
+            _univerHideObserver.observe(host, { childList: true, subtree: true });
+            _applyUniverHiddenCommands(host);
+        }
+
         // Move the Data tab's ribbon items (filter / sort / find / table-
         // selector / data-validation / conditional-formatting / text-to-
         // number) into the Start tab's ribbon row so users don't have to
@@ -2507,6 +2558,7 @@
                 setTimeout(() => {
                     patchStartRibbonWithDataTools(univer);
                     patchStartRibbonWithInsertTools(univer);
+                    startUniverHideObserver();
                 }, 500);
             } else {
                 // Docs mode — `workbookData` is actually an IDocumentData
@@ -2518,6 +2570,7 @@
                     console.error('createUniverDoc failed, retrying with empty doc:', e);
                     univerAPI.createUniverDoc({});
                 }
+                setTimeout(startUniverHideObserver, 500);
             }
 
             sheetState.univer = univer;
